@@ -1,0 +1,22 @@
+# 编译产物（根目录下的可执行文件）
+/anolix
+/sysc
+/probe
+/.sysc-test
+
+# 构建出的 rootfs（由 scripts/mkrootfs.sh 生成，内容为二进制产物）
+/rootfs/
+
+# 本地笔记与讲义，不入库
+/logs/
+
+# Go 常见临时/测试产物
+*.test
+*.out
+coverage.*
+
+# 编辑器与系统杂项
+.vscode/
+.idea/
+*.swp
+.DS_Store
