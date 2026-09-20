@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "name": "Anolix 沙箱运行时 — 当前态架构模型",
+  "scope": "Anolix 仓库当前态：沙箱启动链路（cmd/anolix + config + launcher）、沙箱内工具（probe/sysc/rawfilter）、脚本工具（构建/实验/可视化）与外部依赖（runc / Linux 内核）。",
+  "metadata": {
+    "generatedBy": "architecture-visualization 插件：system-modeler（场景）+ c4model（DSL）+ graphviz（DOT）",
+    "generatedAt": "2026-09-20",
+    "viewStates": "仅 current（当前态）；不含 target/proposed/runtime-observed 节点。",
+    "sourceRefPolicy": "resolvable",
+    "sourceRefNote": "sourceRefs 指向仓库内真实文件；行号为基于 2026-09-20 工作区快照的闭区间。"
+  },
+  "nodes": [
+    {
+      "id": "person.developer",
+      "type": "person",
+      "label": "开发者 / 学习者",
+      "state": "current",
+      "description": "运行沙箱命令、复现三世界对照实验、生成内核机制可视化。",
+      "confidence": "high",
+      "sourceRefs": ["README.md:38-47"]
+    },
+    {
+      "id": "system.anolix",
+      "type": "software-system",
+      "label": "Anolix 沙箱运行时",
+      "state": "current",
+      "description": "把安全策略翻译成 OCI 配置并管理容器生命周期；隔离机制由 runc 与 Linux 内核提供。",
+      "confidence": "high",
+      "sourceRefs": ["README.md:3-6"]
+    },
+    {
+      "id": "container.cli",
+      "type": "container",
+      "label": "anolix CLI",
+      "state": "current",
+      "description": "沙箱启动器：参数解析、策略加载、生成 OCI bundle、驱动 runc、透传退出码。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/anolix/main.go:24-92", "README.md:99-110"]
+    },
+    {
+      "id": "container.probe",
+      "type": "container",
+      "label": "probe 探针",
+      "state": "current",
+      "description": "最小 rootfs 内的自检程序：PID/UTS 隔离、能力集清空、NoNewPrivileges、seccomp 拦截 socket/ptrace。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/probe/main.go:1-14", "scripts/mkrootfs.sh:20"]
+    },
+    {
+      "id": "container.sysc",
+      "type": "container",
+      "label": "sysc 系统调用探针",
+      "state": "current",
+      "description": "按号码直接发起系统调用观察放行/拦截；raw 模式读 rax 原值（不做 errno 转换）。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/sysc/main.go:1-14", "cmd/sysc/raw_amd64.s:1-8"]
+    },
+    {
+      "id": "container.rawfilter",
+      "type": "container",
+      "label": "rawfilter 原始过滤器实验",
+      "state": "current",
+      "description": "手写经典 BPF 过滤器直接装入自身（不经 libseccomp），验证表外号码是否可见。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/rawfilter/main.go:1-17"]
+    },
+    {
+      "id": "container.lab-build",
+      "type": "container",
+      "label": "构建与实验脚本",
+      "state": "current",
+      "description": "mkrootfs.sh 构建最小 rootfs；syscall-lab.sh 复现三世界对照实验。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/mkrootfs.sh:1-5", "scripts/syscall-lab.sh:2-7"]
+    },
+    {
+      "id": "container.lab-visual",
+      "type": "container",
+      "label": "可视化脚本（本地未入库）",
+      "state": "current",
+      "description": "skscope.py 沙箱解剖图（五图 + 状态机）；kstate.py 内核决策状态机。文件存在于工作区，但未纳入 git。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/skscope.py:1-18", "scripts/kstate.py:1-16"]
+    },
+    {
+      "id": "component.cli-main",
+      "type": "component",
+      "label": "CLI 入口（cmd/anolix）",
+      "state": "current",
+      "description": "flag 解析、policy 加载、信号处理（Ctrl+C/SIGTERM）、退出码透传。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/anolix/main.go:24-47", "cmd/anolix/main.go:54-84"]
+    },
+    {
+      "id": "component.config-pkg",
+      "type": "component",
+      "label": "config 包",
+      "state": "current",
+      "description": "policy JSON 严格解析（拒绝未知字段）与取值校验（动作/errnoRet/名单）。",
+      "confidence": "high",
+      "sourceRefs": ["config/config.go:104-142", "config/config_test.go"]
+    },
+    {
+      "id": "component.launcher-pkg",
+      "type": "component",
+      "label": "launcher 包",
+      "state": "current",
+      "description": "OCI spec 生成（spec.go）、bundle 组装与容器生命周期（launcher.go）。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/spec.go:25-92", "launcher/launcher.go:162-212", "launcher/launcher_test.go"]
+    },
+    {
+      "id": "external.runc",
+      "type": "external-system",
+      "label": "runc（OCI 运行时）",
+      "state": "current",
+      "description": "外部依赖：创建命名空间、装载 seccomp 过滤器、以容器 init 执行命令。",
+      "confidence": "high",
+      "sourceRefs": ["README.md:12", "launcher/launcher.go:150-160"]
+    },
+    {
+      "id": "external.kernel",
+      "type": "external-system",
+      "label": "Linux 内核",
+      "state": "current",
+      "description": "隔离机制提供者：namespaces、seccomp BPF、cgroups、设备过滤。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/spec.go:27-48", "README.md:96-97"]
+    },
+    {
+      "id": "artifact.policy-sample",
+      "type": "artifact",
+      "label": "示例 policy（examples/policy.json）",
+      "state": "current",
+      "description": "示例策略文件：seccomp 开启、自定义 errnoRet 与放行名单。",
+      "confidence": "high",
+      "sourceRefs": ["examples/policy.json:1-74"]
+    },
+    {
+      "id": "artifact.rootfs",
+      "type": "artifact",
+      "label": "最小 rootfs（构建产物）",
+      "state": "current",
+      "description": "由 mkrootfs.sh 生成的容器根文件系统（probe + tmp）；/rootfs/ 被 git 忽略。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/mkrootfs.sh:16-22", ".gitignore:7-8"]
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge.developer-to-anolix",
+      "from": "person.developer",
+      "to": "system.anolix",
+      "type": "uses",
+      "sync": "sync",
+      "protocol": "CLI",
+      "description": "运行 anolix run [flags] -- <命令> 在沙箱中执行命令。",
+      "confidence": "high",
+      "sourceRefs": ["README.md:38-47"]
+    },
+    {
+      "id": "edge.labbuild-to-cli",
+      "from": "container.lab-build",
+      "to": "container.cli",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "Bash",
+      "description": "三世界对照实验：经沙箱运行 /sysc（世界 2/3）。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/syscall-lab.sh:43-50"]
+    },
+    {
+      "id": "edge.labbuild-to-sysc",
+      "from": "container.lab-build",
+      "to": "container.sysc",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "Bash（宿主直跑）",
+      "description": "世界 1 对照：无沙箱直跑 rootfs/sysc，观察系统调用原始画像。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/syscall-lab.sh:39-41"]
+    },
+    {
+      "id": "edge.labbuild-to-probe",
+      "from": "container.lab-build",
+      "to": "container.probe",
+      "type": "builds",
+      "sync": "batch",
+      "protocol": "Go build (CGO_ENABLED=0)",
+      "description": "mkrootfs.sh 静态编译 cmd/probe 为 rootfs/probe。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/mkrootfs.sh:20"]
+    },
+    {
+      "id": "edge.labbuild-to-rootfs",
+      "from": "container.lab-build",
+      "to": "artifact.rootfs",
+      "type": "builds",
+      "sync": "batch",
+      "protocol": "file",
+      "description": "生成 rootfs 目录与可写 tmp（1777）。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/mkrootfs.sh:16-19"]
+    },
+    {
+      "id": "edge.labvisual-to-cli",
+      "from": "container.lab-visual",
+      "to": "container.cli",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "Python",
+      "description": "skscope.py 启动真实沙箱抓取 /proc 现场；kstate.py 宿主/沙箱各跑一次做对照。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/skscope.py:8", "scripts/kstate.py:12"]
+    },
+    {
+      "id": "edge.climain-to-configpkg",
+      "from": "component.cli-main",
+      "to": "component.config-pkg",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "in-process",
+      "description": "Default() 取内置策略；指定 --policy 时 Load() 解析文件。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/anolix/main.go:54-62"]
+    },
+    {
+      "id": "edge.climain-to-launcherpkg",
+      "from": "component.cli-main",
+      "to": "component.launcher-pkg",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "in-process",
+      "description": "launcher.New(Options) 构造；Run(ctx) 执行并透传退出码。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/anolix/main.go:64-84"]
+    },
+    {
+      "id": "edge.launcherpkg-to-configpkg",
+      "from": "component.launcher-pkg",
+      "to": "component.config-pkg",
+      "type": "depends-on",
+      "sync": "sync",
+      "protocol": "in-process",
+      "description": "Validate() 校验策略；Effective* 系列取值映射进 OCI spec。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/launcher.go:71-77", "launcher/spec.go:77-92"]
+    },
+    {
+      "id": "edge.launcherpkg-to-runc",
+      "from": "component.launcher-pkg",
+      "to": "external.runc",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "CLI/exec",
+      "description": "BuildRuncArgs 组装参数后 exec runc run --bundle；取消时 SIGTERM 兜底强杀。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/launcher.go:150-160", "launcher/launcher.go:186-196"]
+    },
+    {
+      "id": "edge.cli-to-runc",
+      "from": "container.cli",
+      "to": "external.runc",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "CLI/exec",
+      "description": "容器级视图关系：anolix CLI 驱动 runc 运行容器。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/launcher.go:150-160"]
+    },
+    {
+      "id": "edge.climain-to-policy",
+      "from": "component.cli-main",
+      "to": "artifact.policy-sample",
+      "type": "reads",
+      "sync": "sync",
+      "protocol": "file/JSON",
+      "description": "config.Load 读取 policy 文件（严格解析，未知字段报错）。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/anolix/main.go:55-62", "config/config.go:89-100"]
+    },
+    {
+      "id": "edge.launcherpkg-to-rootfs",
+      "from": "component.launcher-pkg",
+      "to": "artifact.rootfs",
+      "type": "reads",
+      "sync": "sync",
+      "protocol": "file/dir",
+      "description": "EvalSymlinks 规范化 rootfs 绝对路径并写入 config.json。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/launcher.go:255-288"]
+    },
+    {
+      "id": "edge.runc-to-kernel",
+      "from": "external.runc",
+      "to": "external.kernel",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "syscalls",
+      "description": "创建 namespaces、装载 seccomp BPF、应用 cgroup 设备规则。",
+      "confidence": "high",
+      "sourceRefs": ["launcher/spec.go:27-34", "README.md:96-97"]
+    },
+    {
+      "id": "edge.runc-to-probe",
+      "from": "external.runc",
+      "to": "container.probe",
+      "type": "executes",
+      "sync": "sync",
+      "protocol": "container-init",
+      "description": "以容器 init 身份执行 /probe（命令由 CLI 传入）。",
+      "confidence": "high",
+      "sourceRefs": ["README.md:38-47"]
+    },
+    {
+      "id": "edge.runc-to-sysc",
+      "from": "external.runc",
+      "to": "container.sysc",
+      "type": "executes",
+      "sync": "sync",
+      "protocol": "container-init",
+      "description": "实验时以容器 init 身份执行 /sysc。",
+      "confidence": "high",
+      "sourceRefs": ["scripts/syscall-lab.sh:44-45"]
+    },
+    {
+      "id": "edge.probe-to-kernel",
+      "from": "container.probe",
+      "to": "external.kernel",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "syscalls",
+      "description": "自检读取 /proc；探测 socket/ptrace（预期被 seccomp 拦截，errno 由 policy 决定）。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/probe/main.go:96-100", "cmd/probe/main.go:170-189"]
+    },
+    {
+      "id": "edge.sysc-to-kernel",
+      "from": "container.sysc",
+      "to": "external.kernel",
+      "type": "calls",
+      "sync": "sync",
+      "protocol": "syscalls",
+      "description": "按号码发起系统调用，观察放行/拦截（raw 模式看 rax 原值）。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/sysc/main.go:95-102"]
+    },
+    {
+      "id": "edge.rawfilter-to-kernel",
+      "from": "container.rawfilter",
+      "to": "external.kernel",
+      "type": "configures",
+      "sync": "sync",
+      "protocol": "prctl",
+      "description": "PR_SET_NO_NEW_PRIVS + PR_SET_SECCOMP 装载手写经典 BPF 过滤器。",
+      "confidence": "high",
+      "sourceRefs": ["cmd/rawfilter/main.go:105-115"]
+    }
+  ]
+}

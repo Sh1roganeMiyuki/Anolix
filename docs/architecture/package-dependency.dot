@@ -1,0 +1,66 @@
+// package-dependency.dot — Anolix 仓库的 Go 包级依赖图（当前态）
+// 生成方式：架构可视化插件 system-modeler（场景）+ graphviz（DOT 基础）
+// 证据索引：system-model.evidence.md ｜ C4 视图：system-context.structurizr.dsl
+// 预览：在 Qoder 中打开本文件，由插件 canvases/dot 的 Graphviz DOT format viewer 渲染
+//
+// 问题（one view, one question）：仓库内各构建单元的编译期与运行时依赖关系是什么？
+// 约定：实线 = import（编译期，代码证据）；虚线 = exec（运行时，非 import）。
+// 范围：仅列仓库内包与直接第三方依赖；构建脚本、rootfs 装配等见 C4 容器视图。
+// 说明：cmd/probe、cmd/sysc、cmd/rawfilter 是独立静态二进制，不依赖仓库内其他包（仅 Go 标准库）。
+digraph anolix_packages {
+    rankdir=TB;
+    graph [fontname="Helvetica", fontsize=11, labelloc="t",
+           label="Anolix 包级依赖（实线=import，虚线=运行时 exec；全仓库唯一第三方依赖为 runtime-spec）"];
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled",
+          fillcolor="#EEF3FF", color="#2563EB"];
+    edge [fontname="Helvetica", fontsize=9, color="#5B6B8C"];
+
+    subgraph cluster_startup {
+        label="沙箱启动器链路（共享库 + 唯一入口）";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+
+        cmd_anolix [label="cmd/anolix\nCLI 入口（package main）"];
+        pkg_launcher [label="launcher\nspec 生成 + bundle + 生命周期"];
+        pkg_config [label="config\npolicy 严格解析 + 校验"];
+    }
+
+    subgraph cluster_probes {
+        label="独立探针工具（互不依赖，仅标准库）";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+
+        cmd_probe [label="cmd/probe\n沙箱探针（静态编译进 rootfs）"];
+        cmd_sysc [label="cmd/sysc\n系统调用探针（含 raw_amd64.s）"];
+        cmd_rawfilter [label="cmd/rawfilter\n手写经典 BPF 实验"];
+    }
+
+    subgraph cluster_libs {
+        label="编译期第三方依赖（go.mod）";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+
+        lib_spec [label="runtime-spec\nopencontainers/runtime-spec", shape=component,
+                  fillcolor="#FFF7E6", color="#B45309"];
+    }
+
+    bin_runc [label="runc\nOCI 运行时（PATH 中查找）", shape=box3d,
+              style="filled", fillcolor="#FDF2F2", color="#B91C1C"];
+
+    // ---- import 边（代码证据：见 system-model.evidence.md）----
+    cmd_anolix -> pkg_launcher [label="import anolix/launcher"];
+    cmd_anolix -> pkg_config [label="import anolix/config"];
+    pkg_launcher -> pkg_config [label="import anolix/config"];
+    pkg_launcher -> lib_spec [label="import specs-go", color="#B45309"];
+
+    // ---- 运行时边（非 import，虚线）----
+    pkg_launcher -> bin_runc [label="exec（runc run --bundle）", style=dashed, color="#B91C1C"];
+
+    // ---- 运行时说明（非编译依赖）----
+    // cmd/sysc -> kernel：按号码发起系统调用（运行时，不进包图）
+    // cmd/rawfilter -> kernel：prctl 装载手写过滤器（运行时，不进包图）
+    // cmd/probe -> kernel：容器内自检调用（运行时，不进包图）
+}
