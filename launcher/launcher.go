@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"anolix/config"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,8 +16,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
-
-	"anolix/config"
 )
 
 // killWaitDelay 是取消/超时后强制终止 runc 进程的兜底等待时长。

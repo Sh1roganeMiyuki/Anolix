@@ -1,8 +1,9 @@
+
 {
   "seccomp": {
     "enabled": true,
     "defaultAction": "SCMP_ACT_ERRNO",
-    "errnoRet": 1145,
+    "errnoRet": 1145,  
     "allowedSyscalls": [
       "arch_prctl",
       "brk",

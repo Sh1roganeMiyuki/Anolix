@@ -46,7 +46,7 @@ func run() int {
 	status := readStatus()
 	inContainer := os.Getpid() == 1 || hostname() == expectHostname
 
-	fmt.Println("=== Anolix 沙箱探针 ===")
+	fmt.Println("=== Anolix sandbox 探针 ===")
 	if !inContainer {
 		fmt.Println("[info] 未检测到 Anolix 沙箱环境（疑似在宿主机直接运行），仅输出诊断信息")
 	}

@@ -105,10 +105,10 @@ func TestValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse(strings.NewReader(tc.src))
 			if tc.wantErr && err == nil {
-				t.Error("期望报错，实际通过")
+				t.Error("期望报错 实际通过")
 			}
 			if !tc.wantErr && err != nil {
-				t.Errorf("期望通过，实际报错: %v", err)
+				t.Errorf("期望通过 实际报错: %v", err)
 			}
 		})
 	}
