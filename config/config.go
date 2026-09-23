@@ -1,8 +1,10 @@
 // Package config 负责解析 Anolix 的 policy 配置。
 //
-// policy 以 JSON 描述沙箱运行策略，核心是 seccomp 行为：
-// 是否启用 seccomp（enabled）、被拒绝的系统调用返回的 errno（errnoRet），
-// 以及默认动作（defaultAction）与放行名单（allowedSyscalls）。
+// policy 以 JSON 描述沙箱运行策略，当前包含两部分：
+//   - seccomp：是否启用（enabled）、被拒绝的系统调用返回的 errno（errnoRet）、
+//     默认动作（defaultAction）与放行名单（allowedSyscalls）；
+//   - resources：cgroup v2 资源围栏（内存上限、进程数上限、CPU 配额），
+//     各字段为 0 表示不限制。
 package config
 
 import (
@@ -54,10 +56,22 @@ var DefaultAllowedSyscalls = []string{
 	"write", "writev",
 }
 
+// DefaultCPUPeriodMicros 是 cpuPeriodMicros 未配置时使用的默认计费周期：100ms。
+const DefaultCPUPeriodMicros uint64 = 100000
+
+// CFS 计费参数的合法范围（内核约束）：quota 最小 1ms；period 取值 1ms–1s。
+const (
+	minCPUQuotaMicros  int64  = 1000
+	minCPUPeriodMicros uint64 = 1000
+	maxCPUPeriodMicros uint64 = 1000000
+)
+
 // Policy 是 Anolix 的沙箱运行策略。
 type Policy struct {
 	// Seccomp 是 seccomp 过滤器的配置。
 	Seccomp Seccomp `json:"seccomp"`
+	// Resources 是 cgroup v2 资源围栏的配置；各字段为 0 表示不限制。
+	Resources Resources `json:"resources"`
 }
 
 // Seccomp 描述容器内 seccomp 过滤器的行为。
@@ -73,6 +87,21 @@ type Seccomp struct {
 	// AllowedSyscalls 是放行（SCMP_ACT_ALLOW）的系统调用名单；
 	// 为空时回退到 DefaultAllowedSyscalls。
 	AllowedSyscalls []string `json:"allowedSyscalls"`
+}
+
+// Resources 描述 cgroup v2 资源围栏（映射到 OCI LinuxResources，
+// 由 runc 落地为 memory.max / pids.max / cpu.max）。各字段为 0 表示不设置对应限额。
+type Resources struct {
+	// MemoryLimitBytes 是物理内存硬上限（memory.max），单位为字节。
+	MemoryLimitBytes int64 `json:"memoryLimitBytes"`
+	// PidsLimit 是进程数上限（pids.max）。
+	PidsLimit int64 `json:"pidsLimit"`
+	// CPUQuotaMicros 是每个计费周期可用的 CPU 时间（cpu.max 左值），单位为微秒；
+	// 可大于周期本身（如 200000/100000 表示 2 个核的配额）。
+	CPUQuotaMicros int64 `json:"cpuQuotaMicros"`
+	// CPUPeriodMicros 是计费周期（cpu.max 右值），单位为微秒，取值 1000–1000000；
+	// 仅在 CPUQuotaMicros 设置时有效，未配置时取 DefaultCPUPeriodMicros。
+	CPUPeriodMicros uint64 `json:"cpuPeriodMicros"`
 }
 
 // Default 返回内置的默认策略：启用 seccomp，拒绝时返回 EPERM。
@@ -138,6 +167,32 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("seccomp allowedSyscalls 条目 %q 含空白字符", name)
 		}
 	}
+	return p.Resources.Validate()
+}
+
+// Validate 校验资源围栏取值是否合法。
+func (r Resources) Validate() error {
+	if r.MemoryLimitBytes < 0 {
+		return fmt.Errorf("resources.memoryLimitBytes %d 不能为负", r.MemoryLimitBytes)
+	}
+	if r.PidsLimit < 0 {
+		return fmt.Errorf("resources.pidsLimit %d 不能为负", r.PidsLimit)
+	}
+	if r.CPUQuotaMicros < 0 {
+		return fmt.Errorf("resources.cpuQuotaMicros %d 不能为负", r.CPUQuotaMicros)
+	}
+	if r.CPUQuotaMicros > 0 && r.CPUQuotaMicros < minCPUQuotaMicros {
+		return fmt.Errorf("resources.cpuQuotaMicros %d 低于内核下限 (%d)", r.CPUQuotaMicros, minCPUQuotaMicros)
+	}
+	if r.CPUPeriodMicros != 0 {
+		if r.CPUQuotaMicros == 0 {
+			return fmt.Errorf("resources.cpuPeriodMicros 已设置但 cpuQuotaMicros 未设置（周期仅在配额模式下生效）")
+		}
+		if r.CPUPeriodMicros < minCPUPeriodMicros || r.CPUPeriodMicros > maxCPUPeriodMicros {
+			return fmt.Errorf("resources.cpuPeriodMicros %d 超出合法范围 (%d-%d)",
+				r.CPUPeriodMicros, minCPUPeriodMicros, maxCPUPeriodMicros)
+		}
+	}
 	return nil
 }
 
@@ -164,6 +219,14 @@ func (s Seccomp) EffectiveAllowedSyscalls() []string {
 		return append([]string(nil), DefaultAllowedSyscalls...)
 	}
 	return append([]string(nil), s.AllowedSyscalls...)
+}
+
+// EffectiveCPUPeriodMicros 返回生效的 CPU 计费周期：未配置时为 100ms。
+func (r Resources) EffectiveCPUPeriodMicros() uint64 {
+	if r.CPUPeriodMicros == 0 {
+		return DefaultCPUPeriodMicros
+	}
+	return r.CPUPeriodMicros
 }
 
 func validAction(action string) bool {

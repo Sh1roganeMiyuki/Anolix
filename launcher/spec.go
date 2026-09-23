@@ -22,7 +22,11 @@ var DefaultEnv = []string{
 // command 为容器内执行的命令，env 为环境变量，
 // rootfsPath 为写入 spec.Root.Path 的 rootfs 路径（绝对路径或相对 bundle）；
 // rootless 为 true 时追加 user namespace 与 uid/gid 映射（容器 root 映射到当前用户）。
+// policy 中的 seccomp 与资源围栏分别映射到 spec.Linux.Seccomp 与 spec.Linux.Resources。
 func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, rootless bool) *specs.Spec {
+	resources := defaultResources()
+	applyResourceLimits(resources, policy.Resources)
+
 	linux := &specs.Linux{
 		Namespaces: []specs.LinuxNamespace{
 			{Type: specs.PIDNamespace},
@@ -34,7 +38,7 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 		},
 		MaskedPaths:   defaultMaskedPaths(),
 		ReadonlyPaths: defaultReadonlyPaths(),
-		Resources:     defaultResources(),
+		Resources:     resources,
 		Seccomp:       buildSeccomp(policy.Seccomp),
 	}
 	if rootless {
@@ -91,6 +95,27 @@ func buildSeccomp(s config.Seccomp) *specs.LinuxSeccomp {
 	}
 }
 
+// applyResourceLimits 把 policy 的资源围栏合并到 OCI LinuxResources
+// （由 runc 落地为 cgroup v2 的 memory.max / pids.max / cpu.max），
+// 各字段为 0 表示不设置对应限额，原有的设备白名单规则保持不变。
+// 注意：内存 swap 上限（memory.swap.max）暂未映射，是否在内存围栏下强制 swap=0，
+// 留待实验阶段实测后决定。
+func applyResourceLimits(res *specs.LinuxResources, r config.Resources) {
+	if r.MemoryLimitBytes > 0 {
+		res.Memory = &specs.LinuxMemory{Limit: int64Ptr(r.MemoryLimitBytes)}
+	}
+	if r.PidsLimit > 0 {
+		res.Pids = &specs.LinuxPids{Limit: r.PidsLimit}
+	}
+	if r.CPUQuotaMicros > 0 {
+		period := r.EffectiveCPUPeriodMicros()
+		res.CPU = &specs.LinuxCPU{
+			Quota:  int64Ptr(r.CPUQuotaMicros),
+			Period: &period,
+		}
+	}
+}
+
 // defaultMounts 返回容器内最小挂载集：/proc、/dev 及其子目录、只读 /sys。
 // rootless 时不设置 devpts 的 gid=5（tty 组不在 user namespace 的 gid 映射中）。
 func defaultMounts(rootless bool) []specs.Mount {
@@ -108,8 +133,9 @@ func defaultMounts(rootless bool) []specs.Mount {
 	}
 }
 
-// defaultResources 返回默认 cgroup 资源限制：
+// defaultResources 返回基础 cgroup 资源规则：
 // 拒绝所有设备访问，仅放行标准设备节点（null/zero/full/random/urandom/tty/ptmx/pts）。
+// policy 的资源围栏由 applyResourceLimits 在此基础上合并。
 func defaultResources() *specs.LinuxResources {
 	return &specs.LinuxResources{
 		Devices: []specs.LinuxDeviceCgroup{

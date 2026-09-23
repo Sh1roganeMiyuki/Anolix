@@ -71,5 +71,11 @@
       "write",
       "writev"
     ]
+  },
+  "resources": {
+    "memoryLimitBytes": 67108864,
+    "pidsLimit": 20,
+    "cpuQuotaMicros": 20000,
+    "cpuPeriodMicros": 100000
   }
 }

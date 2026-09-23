@@ -48,7 +48,7 @@ go build -o anolix ./cmd/anolix
 
 ## policy 配置
 
-policy 为 JSON 文件，当前核心是 seccomp 行为（示例见 [examples/policy.json](examples/policy.json)）：
+policy 为 JSON 文件，当前包含 seccomp 与 cgroup v2 资源围栏两部分（示例见 [examples/policy.json](examples/policy.json)）：
 
 ```json
 {
@@ -57,6 +57,12 @@ policy 为 JSON 文件，当前核心是 seccomp 行为（示例见 [examples/po
     "defaultAction": "SCMP_ACT_ERRNO",
     "errnoRet": 38,
     "allowedSyscalls": ["read", "write", "close", "exit", "execve"]
+  },
+  "resources": {
+    "memoryLimitBytes": 67108864,
+    "pidsLimit": 20,
+    "cpuQuotaMicros": 20000,
+    "cpuPeriodMicros": 100000
   }
 }
 ```
@@ -67,8 +73,12 @@ policy 为 JSON 文件，当前核心是 seccomp 行为（示例见 [examples/po
 | `seccomp.defaultAction` | string | 未放行系统调用的默认动作，可选 `SCMP_ACT_ERRNO` / `SCMP_ACT_KILL` / `SCMP_ACT_KILL_PROCESS` / `SCMP_ACT_TRAP` | `SCMP_ACT_ERRNO` |
 | `seccomp.errnoRet` | uint | 命中拒绝规则时返回给进程的 errno；0–4095，常见加固取值 38（ENOSYS） | `1`（EPERM） |
 | `seccomp.allowedSyscalls` | []string | 放行（`SCMP_ACT_ALLOW`）的系统调用名单 | 内置最小集（文件读写/内存/进程与信号等，排除网络、ptrace、mount 等） |
+| `resources.memoryLimitBytes` | int64 | 物理内存硬上限（字节），映射 cgroup v2 `memory.max`；0 表示不限制 | `0` |
+| `resources.pidsLimit` | int64 | 进程数上限，映射 `pids.max`；0 表示不限制 | `0` |
+| `resources.cpuQuotaMicros` | int64 | 每个计费周期可用的 CPU 时间（微秒），映射 `cpu.max` 左值；0 表示不限制 | `0` |
+| `resources.cpuPeriodMicros` | uint64 | CPU 计费周期（微秒，取值 1000–1000000）；仅在设置 `cpuQuotaMicros` 时有效 | `100000` |
 
-解析采用严格模式：未知字段、越界 errnoRet、非法动作都会直接报错，不会静默忽略。
+解析采用严格模式：未知字段、越界 errnoRet、非法动作、非法资源取值都会直接报错，不会静默忽略。
 
 ## CLI
 

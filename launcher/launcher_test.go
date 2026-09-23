@@ -171,6 +171,54 @@ func TestBuildSeccompDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildSpecResources(t *testing.T) {
+	policy := &config.Policy{
+		Resources: config.Resources{
+			MemoryLimitBytes: 64 << 20,
+			PidsLimit:        20,
+			CPUQuotaMicros:   20000,
+			CPUPeriodMicros:  100000,
+		},
+	}
+	spec := buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+	res := spec.Linux.Resources
+	if res == nil {
+		t.Fatal("spec.Linux.Resources 不应为 nil（设备规则始终存在）")
+	}
+	if res.Memory == nil || res.Memory.Limit == nil || *res.Memory.Limit != 64<<20 {
+		t.Errorf("Memory.Limit = %+v, 期望 %d", res.Memory, int64(64<<20))
+	}
+	if res.Pids == nil || res.Pids.Limit != 20 {
+		t.Errorf("Pids.Limit = %+v, 期望 20", res.Pids)
+	}
+	if res.CPU == nil || res.CPU.Quota == nil || *res.CPU.Quota != 20000 ||
+		res.CPU.Period == nil || *res.CPU.Period != 100000 {
+		t.Errorf("CPU 配额 = %+v, 期望 quota=20000 period=100000", res.CPU)
+	}
+	// 设备白名单必须保留（资源限额是合并而非覆盖）。
+	if len(res.Devices) == 0 {
+		t.Error("设备白名单规则应在合并后保留")
+	}
+
+	// 只设配额：周期应回退默认 100ms。
+	policy = &config.Policy{Resources: config.Resources{CPUQuotaMicros: 20000}}
+	spec = buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+	cpu := spec.Linux.Resources.CPU
+	if cpu == nil || cpu.Period == nil || *cpu.Period != config.DefaultCPUPeriodMicros {
+		t.Errorf("未配置周期时应回退到 %d, 实际 %+v", config.DefaultCPUPeriodMicros, cpu)
+	}
+
+	// 对照组：全 0（未设置）时不应生成任何限额字段。
+	spec = buildSpec(config.Default(), []string{"/probe"}, DefaultEnv, "rootfs", false)
+	res = spec.Linux.Resources
+	if res == nil {
+		t.Fatal("即使未设限额，Resources 也应保留设备规则")
+	}
+	if res.Memory != nil || res.Pids != nil || res.CPU != nil {
+		t.Errorf("未设置限额时不应生成 Memory/Pids/CPU: %+v", res)
+	}
+}
+
 func TestBuildSpecRootless(t *testing.T) {
 	spec := buildSpec(config.Default(), []string{"/probe"}, DefaultEnv, "rootfs", true)
 
@@ -246,6 +294,13 @@ func TestNewValidation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "policy") {
 		t.Errorf("非法 policy 应报错, 实际: %v", err)
 	}
+
+	badRes := config.Default()
+	badRes.Resources.PidsLimit = -1
+	_, err = New(Options{Command: []string{"/bin/true"}, RuncPath: "/bin/true", Policy: badRes})
+	if err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Errorf("非法资源围栏应报错, 实际: %v", err)
+	}
 }
 
 func TestRunSmoke(t *testing.T) {
@@ -265,6 +320,12 @@ func TestRunSmoke(t *testing.T) {
 			ErrnoRet:        38,
 			DefaultAction:   config.ActionErrno,
 			AllowedSyscalls: []string{"read", "write"},
+		},
+		Resources: config.Resources{
+			MemoryLimitBytes: 64 << 20,
+			PidsLimit:        20,
+			CPUQuotaMicros:   20000,
+			CPUPeriodMicros:  100000,
 		},
 	}
 
@@ -317,6 +378,25 @@ func TestRunSmoke(t *testing.T) {
 	}
 	if spec.Linux.Seccomp == nil || spec.Linux.Seccomp.DefaultErrnoRet == nil || *spec.Linux.Seccomp.DefaultErrnoRet != 38 {
 		t.Errorf("config.json 中 seccomp errnoRet 与 policy 不一致: %+v", spec.Linux.Seccomp)
+	}
+
+	// 资源围栏应完整落进 config.json，且设备白名单规则保留。
+	res := spec.Linux.Resources
+	if res == nil {
+		t.Fatal("config.json 缺少 linux.resources")
+	}
+	if res.Memory == nil || res.Memory.Limit == nil || *res.Memory.Limit != 64<<20 {
+		t.Errorf("config.json 中内存限额与 policy 不一致: %+v", res.Memory)
+	}
+	if res.Pids == nil || res.Pids.Limit != 20 {
+		t.Errorf("config.json 中进程数上限与 policy 不一致: %+v", res.Pids)
+	}
+	if res.CPU == nil || res.CPU.Quota == nil || *res.CPU.Quota != 20000 ||
+		res.CPU.Period == nil || *res.CPU.Period != 100000 {
+		t.Errorf("config.json 中 CPU 配额与 policy 不一致: %+v", res.CPU)
+	}
+	if len(res.Devices) == 0 {
+		t.Error("config.json 中设备白名单规则不应为空")
 	}
 
 	// runc 要求 rootfs 为规范化绝对路径（拒绝符号链接），

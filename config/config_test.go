@@ -60,8 +60,9 @@ func TestParseAppliesDefaults(t *testing.T) {
 
 func TestParseRejectsUnknownField(t *testing.T) {
 	cases := map[string]string{
-		"顶层未知字段":       `{"seccomp": {"enabled": true}, "unknown": 1}`,
-		"seccomp 未知字段": `{"seccomp": {"enabled": true, "foo": 1}}`,
+		"顶层未知字段":         `{"seccomp": {"enabled": true}, "unknown": 1}`,
+		"seccomp 未知字段":   `{"seccomp": {"enabled": true, "foo": 1}}`,
+		"resources 未知字段": `{"resources": {"memoryLimit": 1}}`,
 	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -100,6 +101,16 @@ func TestValidate(t *testing.T) {
 		{"errnoRet 越界", `{"seccomp": {"enabled": true, "errnoRet": 4096}}`, true},
 		{"放行名单含空条目", `{"seccomp": {"enabled": true, "allowedSyscalls": ["read", ""]}}`, true},
 		{"放行名单含空白", `{"seccomp": {"enabled": true, "allowedSyscalls": ["read file"]}}`, true},
+		{"资源围栏合法", `{"resources": {"memoryLimitBytes": 67108864, "pidsLimit": 20, "cpuQuotaMicros": 20000, "cpuPeriodMicros": 100000}}`, false},
+		{"配额与周期下界合法", `{"resources": {"cpuQuotaMicros": 1000, "cpuPeriodMicros": 1000}}`, false},
+		{"配额与周期上界合法", `{"resources": {"cpuQuotaMicros": 200000, "cpuPeriodMicros": 1000000}}`, false},
+		{"内存上限为负", `{"resources": {"memoryLimitBytes": -1}}`, true},
+		{"进程上限为负", `{"resources": {"pidsLimit": -1}}`, true},
+		{"CPU 配额为负", `{"resources": {"cpuQuotaMicros": -1}}`, true},
+		{"CPU 配额低于内核下限", `{"resources": {"cpuQuotaMicros": 999}}`, true},
+		{"周期已设置但配额未设置", `{"resources": {"cpuPeriodMicros": 100000}}`, true},
+		{"周期低于下界", `{"resources": {"cpuQuotaMicros": 20000, "cpuPeriodMicros": 999}}`, true},
+		{"周期高于上界", `{"resources": {"cpuQuotaMicros": 20000, "cpuPeriodMicros": 1000001}}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,5 +182,52 @@ func TestEffectiveErrnoRet(t *testing.T) {
 		if got := s.EffectiveErrnoRet(); got != tc.want {
 			t.Errorf("ErrnoRet=%d 时 EffectiveErrnoRet() = %d, 期望 %d", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestParseResources(t *testing.T) {
+	src := `{"resources": {"memoryLimitBytes": 67108864, "pidsLimit": 20, "cpuQuotaMicros": 20000}}`
+	p, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse() 出错: %v", err)
+	}
+	if p.Resources.MemoryLimitBytes != 67108864 {
+		t.Errorf("MemoryLimitBytes = %d, 期望 67108864", p.Resources.MemoryLimitBytes)
+	}
+	if p.Resources.PidsLimit != 20 {
+		t.Errorf("PidsLimit = %d, 期望 20", p.Resources.PidsLimit)
+	}
+	if p.Resources.CPUQuotaMicros != 20000 {
+		t.Errorf("CPUQuotaMicros = %d, 期望 20000", p.Resources.CPUQuotaMicros)
+	}
+	// 未配置周期时应回退到默认值。
+	if got := p.Resources.EffectiveCPUPeriodMicros(); got != DefaultCPUPeriodMicros {
+		t.Errorf("EffectiveCPUPeriodMicros() = %d, 期望 %d", got, DefaultCPUPeriodMicros)
+	}
+}
+
+func TestEffectiveCPUPeriodMicros(t *testing.T) {
+	cases := []struct {
+		in, want uint64
+	}{
+		{0, DefaultCPUPeriodMicros},
+		{50000, 50000},
+	}
+	for _, tc := range cases {
+		r := Resources{CPUPeriodMicros: tc.in}
+		if got := r.EffectiveCPUPeriodMicros(); got != tc.want {
+			t.Errorf("CPUPeriodMicros=%d 时 EffectiveCPUPeriodMicros() = %d, 期望 %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestExamplePolicyLoads 确保仓内示例 policy 始终能被严格解析器接受（防止示例漂移）。
+func TestExamplePolicyLoads(t *testing.T) {
+	p, err := Load(filepath.Join("..", "examples", "policy.json"))
+	if err != nil {
+		t.Fatalf("examples/policy.json 应可加载: %v", err)
+	}
+	if p.Resources == (Resources{}) {
+		t.Error("示例 policy 应包含资源围栏基线")
 	}
 }
