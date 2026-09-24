@@ -15,6 +15,10 @@
 *.out
 coverage.*
 
+# 临时源码缓存（go mod download 拉取依赖源码用于定位实现，勿提交）
+/.tmpgm/
+/.tmprs/
+
 # Python 缓存
 __pycache__/
 *.pyc

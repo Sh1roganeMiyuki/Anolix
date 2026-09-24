@@ -33,6 +33,9 @@ const (
 
 // DefaultAllowedSyscalls 是未显式配置放行名单时使用的最小系统调用集合，
 // 覆盖执行常见命令（文件读写、内存管理、进程与信号、基础时间/随机数）所需的调用；
+// 进程创建同时放行 clone/clone3 与 fork/vfork：前者是 Go/glibc 的创建路径，
+// 后者是 musl/busybox 等用户态实际使用的路径——漏掉不会报错，只会静默失败
+// （实测：名单只有 clone 时，busybox 的 fork 被 defaultAction 盖章）。
 // 网络、ptrace、mount、bpf、keyctl 等高风险调用不在其中。
 var DefaultAllowedSyscalls = []string{
 	"access", "arch_prctl", "brk", "chdir", "chmod", "clock_getres",
@@ -40,19 +43,19 @@ var DefaultAllowedSyscalls = []string{
 	"close_range", "dup", "dup2", "dup3", "epoll_create1", "epoll_ctl",
 	"epoll_pwait", "epoll_wait", "eventfd2", "execve", "execveat", "exit",
 	"exit_group", "faccessat", "faccessat2", "fchmod", "fchmodat", "fchown",
-	"fcntl", "flock", "fstat", "fstatfs", "fsync", "ftruncate", "futex",
+	"fcntl", "flock", "fork", "fstat", "fstatfs", "fsync", "ftruncate", "futex",
 	"getcwd", "getdents64", "getegid", "geteuid", "getgid", "getgroups",
 	"getpid", "getppid", "getrandom", "getresgid", "getresuid", "getrlimit",
 	"getrusage", "gettid", "gettimeofday", "getuid", "ioctl", "kill", "link",
 	"linkat", "lseek", "madvise", "mkdir", "mkdirat", "mmap", "mprotect",
-	"mremap", "munmap", "nanosleep", "newfstatat", "openat", "openat2",
+	"mremap", "munmap", "nanosleep", "newfstatat", "open", "openat", "openat2",
 	"pipe", "pipe2", "poll", "ppoll", "prctl", "pread64", "prlimit64",
 	"pwrite64", "read", "readlink", "readlinkat", "readv", "rename",
 	"renameat", "renameat2", "restart_syscall", "rmdir", "rseq",
 	"rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sched_getaffinity",
 	"sched_yield", "set_robust_list", "set_tid_address", "sigaltstack",
 	"statfs", "statx", "symlink", "symlinkat", "tgkill", "time", "truncate",
-	"umask", "uname", "unlink", "unlinkat", "utimensat", "wait4", "waitid",
+	"umask", "uname", "unlink", "unlinkat", "utimensat", "vfork", "wait4", "waitid",
 	"write", "writev",
 }
 
