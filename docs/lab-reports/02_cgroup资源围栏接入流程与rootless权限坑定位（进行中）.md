@@ -1,4 +1,4 @@
-# 02_cgroup 资源围栏接入流程与 rootless 权限坑定位（进行中）
+# 02_cgroup 资源围栏接入流程与 rootless 权限坑定位
 
 > 研究文档系列 02 ｜ 2026-09-24
 > 项目：Anolix（轻量沙箱运行时核心，Go + runc）
