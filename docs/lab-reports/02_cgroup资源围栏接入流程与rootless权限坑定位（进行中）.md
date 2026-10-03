@@ -1,4 +1,4 @@
-# 02_cgroup 资源围栏接入流程与 rootless 权限坑定位
+# 02_cgroup 资源围栏接入流程与 rootless 权限限制定位
 
 > 研究文档系列 02 ｜ 2026-09-24
 > 项目：Anolix（轻量沙箱运行时核心，Go + runc）
@@ -21,7 +21,7 @@
 
 验证标准：每个限额都要在**内核接口文件里读到数字**，并在超限时观察到**执法行为**（fork 被拒 / OOM / CPU 节流）——只看配置不算数。
 
-本篇记录四件事：模块接入、rootless 权限坑、pids 围栏取证、CPU 围栏取证。其中 pids 的取证过程本身又是一次"错误签名"分析：**同一条 fork 循环命令先后给出三种不同的失败文案**，分别对应 seccomp 层、白名单缺口、cgroup 层——文案本身就是分层判据。
+本篇记录五件事：模块接入、rootless 权限限制、memory / pids / CPU 三道具围栏的执法取证。其中 pids 的取证过程本身又是一次"错误签名"分析：**同一条 fork 循环命令先后给出三种不同的失败文案**，分别对应 seccomp 层、白名单缺口、cgroup 层——文案本身就是分层判据；memory 的取证给出 OOM kill 的 dmesg 判据与两份可复现样本（第四章）。
 
 ---
 
@@ -70,7 +70,7 @@ unknown field "resources"
 
 ---
 
-## 二、rootless 权限坑：cgroup 建立被拒
+## 二、rootless 权限限制：cgroup 建立被拒
 
 ### 2.1 原始报错
 
@@ -122,13 +122,13 @@ if createErr != nil {
 
 runc 官方测试矩阵（tests/integration/cgroups.bats）覆盖了对应象限：无限制 + 无权限 → 跳过且成功；有限制 + 无权限 → 报错。行为属预期设计，不是本项目缺陷。
 
-### 2.4 权限尝试：chmod 是死路（实测记录）
+### 2.4 权限尝试：chmod 无效（实测记录）
 
 | 尝试 | 结果 |
 | --- | --- |
 | 普通用户 `chmod -x /sys/fs/cgroup` | Operation not permitted（非属主；且方向也错——缺的是 w，不是去掉 x） |
 | `sudo chmod +w /sys/fs/cgroup` | 命令成功：555 → 755，但只加到属主位（umask 滤掉 group/other 的 w）；普通用户身份重跑依然 mkdir 被拒 |
-| 对照：`chmod o+w` 自己名下的 app.slice | 成功（0755→0757，随后已还原）——"改得动"的前提是"地归你" |
+| 对照：`chmod o+w` 自己名下的 app.slice | 成功（0755→0757，随后已还原）——修改权限的前提是目录属主是自己 |
 
 两个出口由此收敛：
 
@@ -223,7 +223,7 @@ sh: can't fork: Resource temporarily unavailable
 
 至此同一条命令的三种文案完成归因：**无名 errno = seccomp 盖章；/dev/null 无名 errno = 白名单缺口（open）；EAGAIN = cgroup pids 围栏**。
 
-### 3.5 三层签名小抄
+### 3.5 三层签名对照表
 
 | 观测到的错误 | 出自哪层 | 语义 |
 | --- | --- | --- |
@@ -235,21 +235,76 @@ sh: can't fork: Resource temporarily unavailable
 
 ---
 
-## 四、CPU 围栏实证：throttle 的读数
+## 四、memory 围栏实证：OOM kill 的 dmesg 判据
 
-### 4.1 为什么 CPU 围栏没有错误输出
+### 4.1 实验装置
+
+容器内持续分配匿名内存直到越过 `memory.max = 67108864`（64 MiB）；死因由宿主 `dmesg` 判定。
+
+> 装置备注（详见 03 篇）：指数装置（`x="$x$x$x$x"`）毫秒级越界、读数抓不到爬升过程；可观测版用“每步 +10MB、步间 sleep 1”的阶梯装置。
+
+### 4.2 原始 dmesg（两份样本）
+
+样本一（wall-clock 格式，`dmesg -T`）：
+
+```text
+[Fri Sep 25 10:13:55 2026] busybox invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0
+[Fri Sep 25 10:13:55 2026] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=anolix-7c480544055c,mems_allowed=0,oom_memcg=/anolix-7c480544055c,task_memcg=/anolix-7c480544055c,task=busybox,pid=5570,uid=0
+[Fri Sep 25 10:13:55 2026] Memory cgroup out of memory: Killed process 5570 (busybox) total-vm:79428kB, anon-rss:64908kB, file-rss:584kB, shmem-rss:0kB, UID:0 pgtables:180kB oom_score_adj:0
+```
+
+样本二（另一轮复跑；raw 格式，时间戳为开机秒数）：
+
+```text
+[97651.671100] oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=anolix-d2094fe02604,mems_allowed=0,oom_memcg=/anolix-d2094fe02604,task_memcg=/anolix-d2094fe02604,task=busybox,pid=12367,uid=0
+[97651.671117] Memory cgroup out of memory: Killed process 12367 (busybox) total-vm:99604kB, anon-rss:64940kB, file-rss:452kB, shmem-rss:0kB, UID:0 pgtables:180kB oom_score_adj:0
+```
+
+### 4.3 两份样本对照
+
+| 项 | 样本一 | 样本二 |
+| --- | --- | --- |
+| 容器 cgroup | anolix-7c480544055c | anolix-d2094fe02604 |
+| 被杀进程 | busybox（pid 5570） | busybox（pid 12367） |
+| total-vm | 79,428 kB（约 77.6 MB） | 99,604 kB（约 97.3 MB） |
+| anon-rss | 64,908 kB（约 63.4 MiB） | 64,940 kB（约 63.4 MiB） |
+| shmem-rss | 0 | 0 |
+
+- **anon-rss 两次都贴住 64 MiB 上限（63.4 MiB）** → 击杀发生在“charge 越过 memory.max”的瞬间；
+- total-vm 差异（77.6 → 97.3 MB）反映被杀那一刻**在途分配规模不同**（realloc 的新缓冲 + 旧缓冲 + 壳子）【推导】——装置/步长可以不同，签名不变。
+
+### 4.4 字段判据
+
+| 字段 | 读数特征 | 判读 |
+| --- | --- | --- |
+| `constraint=CONSTRAINT_MEMCG`；`oom_memcg` 与 `task_memcg` 相同 | 均为容器 cgroup | 击杀**被约束在容器自己的 cgroup 内**——不是宿主全局 OOM【内核固定】 |
+| `anon-rss` | 两次均 ≈ 63.4 MiB | 铁贴 64 MiB 上限被杀 |
+| `shmem-rss = 0` | — | 与“匿名内存炸弹”装置一致（非 tmpfs 路径） |
+| 时间戳格式 | `[Fri Sep 25 10:13:55 2026]` vs `[97651.671100]` | 前者是 `-T` 墙钟；后者是 raw 开机秒数，跨样本比较先确认格式 |
+
+### 4.5 结论
+
+1. memory 围栏三段链闭环：声明（policy）→ 映射（`memory.max`）→ 执法（OOM kill，约束=memcg）；
+2. 已知缺口：`memory.swap.max` 未映射（默认 max）——有 swap 时超额可能被“换出消化”而不是击杀；裁决为【待实现】：内存围栏下强制 swap=0；
+3. 复现性：两份独立样本签名一致（constraint=memcg + anon-rss 贴上限）。
+
+---
+
+## 五、CPU 围栏实证：throttle 的读数
+
+### 5.1 为什么 CPU 围栏没有错误输出
 
 三道围栏的执法方式不同，可观测签名也因此不同：
 
 | 围栏 | 执法方式 | 可观测签名 |
 | --- | --- | --- |
-| memory.max | OOM kill | 进程被杀（退出码 137）+ dmesg 记录【待续】 |
+| memory.max | OOM kill | dmesg：constraint=CONSTRAINT_MEMCG、anon-rss 贴 64 MiB 上限（已实证，第四章） |
 | pids.max | 拒绝新增 | fork 返回 EAGAIN（第三章） |
 | cpu.max | throttle：周期内配额用尽即冻结，下周期再放行 | **无任何错误输出**，只能读 cpu.stat |
 
 因此 CPU 围栏的取证不能等报错，必须主动布点读计数器。
 
-### 4.2 实验装置
+### 5.2 实验装置
 
 容器内起两个纯用户态死循环（0 个系统调用，seccomp 不参与），前台 sleep 30 撑出观测窗口：
 
@@ -279,7 +334,7 @@ watch -n 1 "cat $c/cpu.stat"
 === 燃烧结束 ===
 ```
 
-### 4.3 原始读数
+### 5.3 原始读数
 
 ```
 Every 1.0s: cat /sys/fs/cgroup/anolix-3aee011e67c6/cpu.stat          LAPTOP-BF0J00M9: Thu Sep 24 19:02:41 2026
@@ -295,7 +350,7 @@ nr_bursts  0
 burst_usec  0
 ```
 
-### 4.4 数字自洽性核对
+### 5.4 数字自洽性核对
 
 配置值：cpu.max = `20000 100000`（0.2 核，由 policy 映射写入）。【项目自定义 → 内核固定】
 
@@ -309,13 +364,13 @@ burst_usec  0
 
 五项读数互相咬合：配额（0.2 核）、周期（100ms）、限流频率（每周期）、冻结总量（需求−发放）全部对得上——**cpu.max 的执法行为完成实证**。
 
-### 4.5 结论
+### 5.5 结论
 
 CPU 围栏的签名是"读数"而不是"报错"：usage_usec 的斜率恒为配额比例、nr_throttled 持续累加。这与 06 讲义的模型一致——throttle 是"跑跑停停"，不是降频，也不是拒绝。【内核固定】
 
 ---
 
-## 五、观测窗口坑（方法论）
+## 六、观测窗口约束（方法论）
 
 cgroup 目录随容器生命周期存在与消失，"何时读"与"读什么"同等重要：
 
@@ -325,16 +380,16 @@ cgroup 目录随容器生命周期存在与消失，"何时读"与"读什么"同
 
 ---
 
-## 六、结论与待续
+## 七、结论与待续
 
-### 6.1 阶段性结论
+### 7.1 阶段性结论
 
-1. 三段链全部打通：声明（policy）→ 翻译（OCI spec）→ 执法（内核接口文件读数 + 执法行为），pids 与 cpu 两道围栏均拿到第一手证据；memory 围栏【待续】；
+1. 三段链全部打通，**三道具围栏均拿到第一手执法证据**：memory——OOM kill（dmesg constraint=CONSTRAINT_MEMCG、anon-rss 贴上限，第四章）；pids——fork 返回 EAGAIN（第三章）；cpu——cpu.stat 读数五项自洽（第五章）；
 2. rootless + 有限额 + 无权限 = 硬报错；rootless + 无限额 = 静默跳过。分界条件：是否需要控制器。【runc 实现】
-3. 权限坑的出口只有两条：**换身份**（sudo）或**换地块**（委派子树）；chmod 修不了（方向也不对）；
+3. 权限限制的出口只有两条：**换身份**（sudo）或**换地块**（委派子树）；chmod 修不了（方向也不对）；
 4. 同一条命令的三种失败文案证明：**错误文案本身就是分层判据**——无名 errno 指向策略层，有名字的错误指向内核层。
 
-### 6.2 教训
+### 7.2 教训
 
 - **二进制版本是第一嫌疑**：解析层报错（unknown field）先查"跑的哪个二进制"；
 - **"配置了" ≠ "生效了"**：限额证据是内核文件里的数字与执法行为（EAGAIN / OOM / 节流读数），不是 policy.json 里的声明；
@@ -342,16 +397,17 @@ cgroup 目录随容器生命周期存在与消失，"何时读"与"读什么"同
 - **CPU 围栏不产生错误输出**：观测必须主动布点（cpu.stat），等报错会永远等不到；
 - **实验装置要包含"读取窗口"**：cgroup 对象只在容器存活期存在，涉及存活时间的失败模式（fork 失败即退）要先想清楚撑窗口的手段。
 
-### 6.3 待续实验清单
+### 7.3 待续实验清单
 
 | # | 实验 | 观测点 | 状态 |
 | --- | --- | --- | --- |
 | 1 | pids 三件套读数（窗口内读取，命令见附录） | pids.max / pids.current / pids.events | 待执行 |
-| 2 | 内存超限 | 容器退出码 137 + dmesg "Memory cgroup out of memory" | 待执行 |
+| 2 | 内存超限 | dmesg "Memory cgroup out of memory"、constraint=CONSTRAINT_MEMCG | **已实证（第四章；两份样本）** |
 | 3 | 委派子树对照（systemd-run --user --scope） | 容器 cgroup 落在 app.slice 下、三件套可读可写 | 待执行 |
 | 4 | 2.6 失败点漂移复现 | 固定环境复现一次 | 待复核 |
 | 5 | 探针判据与 errnoRet 对齐 | probe 的 blocked() 只认 EPERM/ENOSYS，errnoRet=1145 下误报 fail | 待实现 |
 | 6 | 第二批工具：内存炸弹 / CPU 忙循环专用探针 | 替代 busybox 的粗验证 | 未开始 |
+| 7 | `memory.swap.max = 0` 映射（policy 字段 + spec 映射 + 单测） | 越界即击杀，不再被换出消化 | 待实现 |
 
 ---
 
@@ -376,6 +432,12 @@ sudo ./anolix run --policy examples/policy.json --rootfs ./rootfs --timeout 60s 
   /bin/busybox sh -c 'i=0; ( while :; do i=$((i+1)); done ) & j=0; ( while :; do j=$((j+1)); done ) & /bin/busybox sleep 30'
 # 第二终端（窗口内）：
 c=$(ls -dt /sys/fs/cgroup/anolix-* | head -1); watch -n 1 "cat $c/cpu.stat"
+
+# memory 实验（10MB 步进装置；applet 必须带 /bin/busybox 前缀）
+sudo ./anolix run --policy examples/policy.json --rootfs ./rootfs --timeout 60s -- \
+  /bin/busybox sh -c 's=""; i=1; while [ $i -le 15 ]; do chunk=$(/bin/busybox yes | /bin/busybox head -c 10000000); s="${s}${chunk}"; echo "[Step $i] 约 $((i*10)) MB"; i=$((i+1)); /bin/busybox sleep 1; done'
+# 死因判定（raw 格式无 -T，时间戳为开机秒数）
+sudo dmesg | grep -i -E 'CONSTRAINT_MEMCG|Memory cgroup out of memory'
 
 # 名单点验（容器内按号码观测）
 sudo ./anolix run --policy examples/policy.json --rootfs ./rootfs -- /sysc 57   # fork：放行则输出父子两份
