@@ -234,10 +234,9 @@ stat("/usr/local/bin/grep",  …) = -1 EPERM
 | # | 实验 | 观测点 | 状态 |
 | --- | --- | --- | --- |
 | 1 | `*_for_children` 中间态（第四章） | unshare 后未 fork 的进程 | **已实证（第四章）** |
-| 2 | 钉住 ns（bind mount ns 文件 → pause 容器原理） | ns 里无进程仍可 nsenter | 待执行 |
-| 3 | time ns（未隔离维度的对照） | timens_offsets 与 CLOCK_MONOTONIC 偏移 | 待执行 |
-| 4 | 禁嵌套：容器内 `unshare -u` / `sysc 272` | 预期 1145（名单未放行 unshare） | 待执行 |
-| 5 | 名单补 `stat`（及候选 `lstat`） | 裸名命令恢复可用 | 待实现 |
+| 2 | time ns（未隔离维度的对照） | timens_offsets 与 CLOCK_MONOTONIC 偏移 | 待执行 |
+| 3 | 禁嵌套：容器内 `unshare -u` / `sysc 272` | 预期 1145（名单未放行 unshare） | 待执行 |
+| 4 | 名单补 `stat`（及候选 `lstat`） | 裸名命令恢复可用 | 待实现 |
 
 ---
 
