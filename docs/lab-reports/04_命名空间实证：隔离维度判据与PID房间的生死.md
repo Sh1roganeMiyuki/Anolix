@@ -66,10 +66,23 @@ ls -l /proc/<宿主pid>/ns/
 ### 2.3 三个结论
 
 1. 与 `spec.go` 声明的 6 个 namespace 逐一对应，另加 rootless 的 user → **7 维隔离成立**；
-2. **time 是唯一没隔离的维度**：spec 未声明 TimeNamespace，两边共享初始 time 视图（`CLOCK_MONOTONIC` 无偏移）。"知道哪一维没开"与"知道哪一维开了"同等重要；
-3. `*_for_children` 是别名视图：显示"将来 fork 的子进程会进哪个 ns"。稳态下与本体相等；若某进程"已 unshare(CLONE_NEWPID) 但还没 fork"，会看到 `pid ≠ pid_for_children`（见【待续】实验 3）。
+2. **time 是初测时唯一没隔离的维度**：当时 spec 未声明 TimeNamespace，两边共享初始 time 视图。"知道哪一维没开"与"知道哪一维开了"同等重要（复测补上后见 2.4）；
+3. `*_for_children` 是别名视图：显示"将来 fork 的子进程会进哪个 ns"。稳态下与本体相等；若某进程"已 unshare(CLONE_NEWPID) 但还没 fork"，会看到 `pid ≠ pid_for_children`（见第四章）。
 
-### 2.4 附带发现：宿主自己也在"房间里"
+### 2.4 复测（2026-10-04）：为 spec 加入 TimeNamespace 后
+
+`spec.go` 的 namespaces 列表追加一行 `{Type: specs.TimeNamespace},` 并重编译后复测（rootless）：
+
+| 维度 | 宿主 | 容器（初测） | 容器（复测） | 判读 |
+| --- | --- | --- | --- | --- |
+| time | 4026531834 | 4026531834（同号） | **4026532303（不同号）** | 隔离已生效 |
+| 其余 7 维 | — | 均不同 | 均不同 | 无回归 |
+
+- time inode 的号段与其他几个不同，只是**创建时机不同**（CLONE_NEWTIME 单独创建）；判据仍只看"是否与宿主相同"；
+- **偏移默认是 0**：隔离已生效（inode 不同），但 `CLOCK_MONOTONIC`/`BOOTTIME` 的数值暂与宿主一致；要产生数值差异需另行写 offsets【内核固定】；
+- 至此隔离维度 **8/8**（六个基础 + rootless 的 user + time）。
+
+### 2.5 附带发现：宿主自己也在"房间里"
 
 对照初始 ns 的典型值（cgroup=…835、user=…837、time=…834 等），宿主 shell 的 pid/mnt/ipc/uts/net inode 均非初始值 → 本机 WSL 的登录会话自身处于一层命名空间内。即观察到的实际层次为：**WSL 会话 ns → anolix 容器 ns**，嵌套隔离的一个现成样本【判读】。
 
