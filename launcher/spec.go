@@ -74,6 +74,7 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 			{Type: specs.UTSNamespace},     // 主机名独立：容器里 hostname=anolix
 			{Type: specs.MountNamespace},   // 挂载表独立：容器里挂的东西宿主看不见（03 篇"单向玻璃"）
 			{Type: specs.CgroupNamespace},  // cgroup 视图独立：容器只看到自己那一格
+			{Type: specs.TimeNamespace},
 		},
 		// 掩蔽：用 /dev/null 盖住一批敏感文件，容器里读它们只会得到空内容。
 		MaskedPaths: defaultMaskedPaths(),
