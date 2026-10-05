@@ -86,7 +86,14 @@
       "wait4",
       "waitid",
       "write",
-      "writev"
+      "writev",
+      "newfstatat",
+      "getdents64",
+      "ioctl",
+      "stat",
+      "lstat",
+      "setuid",
+      "setgid"
     ]
   },
   "resources": {

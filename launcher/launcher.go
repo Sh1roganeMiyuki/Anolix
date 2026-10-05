@@ -66,6 +66,8 @@ type Options struct {
 	Timeout time.Duration
 	// KeepBundle 为 true 时保留自动创建的 bundle 目录（调试用：方便事后看 config.json）。
 	KeepBundle bool
+	// Timing 为 true 时向 Stderr 打印启动各阶段耗时（启动开销实验用；默认关闭）。
+	Timing bool
 }
 
 // Launcher 是一次容器运行的执行器（把一次运行所需的全部信息装在一起）。
@@ -211,12 +213,20 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 		defer cancel() // defer = 本函数返回前一定会执行，用来回收计时器
 	}
 
+	// --- 【可略读】计时脚手架：--timing 时打印"启动开销"的阶段账；
+	// t0 = 进入 launcher 的时刻，后面每过一个阶段打一次差值（默认关闭，零影响）。
+	t0 := time.Now()
+
 	// 第 2 步：准备 bundle（建目录 + 写说明书），失败就直接返回。
 	// 第 3 步：登记"退出时删临时 bundle"——不管后面成功失败都会执行。
 	if err := l.prepareBundle(); err != nil {
 		return -1, err
 	}
 	defer l.cleanupBundle()
+	if l.opts.Timing {
+		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ① 准备 bundle（含写 config.json）: %v\n",
+			time.Since(t0).Round(100*time.Microsecond))
+	}
 
 	// 第 4 步：确定 runc 的"记账本"目录；rootless 时保证它存在且只有自己能读。
 	stateDir := l.stateDir()
@@ -246,6 +256,8 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = killWaitDelay
 
+	// 计时：t1 是"runc 全程"的起点（拉起 runc → 容器退出的整段，含容器运行与收尾）。
+	t1 := time.Now()
 	// 第 6 步：启动。启动都失败的话，尽力清理可能残留的容器。
 	if err := cmd.Start(); err != nil {
 		l.forceDeleteContainer()
@@ -254,6 +266,10 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 
 	// 第 7 步：等它退出，并解析退出码。
 	code, waitErr := waitExitCode(cmd)
+	if l.opts.Timing {
+		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ② runc 全程（拉起→容器退出）: %v\n",
+			time.Since(t1).Round(100*time.Microsecond))
+	}
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	// 【面试必会】退出码语义：被取消且拿不到容器的码时，自己填 128+SIGKILL=137。
 	//   为什么：137 会与"内核 OOM"撞值——判据靠文案与 dmesg（02 篇、笔记 04）。

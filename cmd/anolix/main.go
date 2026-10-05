@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"anolix/config"
 	"anolix/launcher"
@@ -36,6 +38,9 @@ func main() {
 //
 //	"退出码从容器到 shell 的完整链路"（容器码 → runc → anolix → $?）。
 func run() int {
+	// 计时起点（--timing 的总账从这里算）：放在最前面，越早越接近真实启动。
+	t0 := time.Now()
+
 	// 第 1 步：必须是 `anolix run ...` 的形式（本版本只有一个子命令 run）。
 	// 参数不对就打印用法并返回 2（"命令行用法错误"的惯例退出码）。
 	if len(os.Args) < 2 || os.Args[1] != "run" {
@@ -55,6 +60,7 @@ func run() int {
 	runcPath := fs.String("runc", "", "runc 可执行文件路径；缺省在 PATH 中查找")
 	timeout := fs.Duration("timeout", 0, "容器运行超时（如 30s）；0 表示不限")
 	keepBundle := fs.Bool("keep-bundle", false, "退出后保留 bundle 目录（调试用）")
+	timing := fs.Bool("timing", false, "打印各阶段耗时（测启动开销用）")
 
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
@@ -79,6 +85,17 @@ func run() int {
 		policy = p
 	}
 
+	// --timing 的"起点锚"：读一次系统开机秒数（/proc/uptime 格式：秒.百分秒）。
+	// 容器里执行 `cat /proc/uptime` 可拿到同一时钟的读数，相减 = 真·冷启动时间；
+	// 即使套着 strace（它只拖慢进程、不动时钟）也对得上。
+	if *timing {
+		if up, err := os.ReadFile("/proc/uptime"); err == nil {
+			if fields := strings.Fields(string(up)); len(fields) > 0 {
+				fmt.Fprintf(os.Stderr, "anolix: [timing] 起点 uptime=%s（可与容器内 /proc/uptime 对账）\n", fields[0])
+			}
+		}
+	}
+
 	// 第 5 步：把参数打包交给 launcher——校验、找 runc、生成容器 ID 都在里面做。
 	l, err := launcher.New(launcher.Options{
 		ContainerID: *id,
@@ -90,6 +107,7 @@ func run() int {
 		Command:     command,
 		Timeout:     *timeout,
 		KeepBundle:  *keepBundle,
+		Timing:      *timing,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "anolix: %v\n", err)
@@ -115,6 +133,10 @@ func run() int {
 	// !!! 【值得会说】退出码链路最后一跳：容器码 → runc → anolix → shell。
 	//     137 / 143 的含义见 launcher.waitExitCode 处的【面试必会】标记。
 	// 退出码原样透传：0=成功；137=被 SIGKILL；143=被 SIGTERM……
+	if *timing {
+		// 总账：run() 入口 → 容器退出（含参数解析、策略加载、bundle 清理）。
+		fmt.Fprintf(os.Stderr, "anolix: [timing] 总计（入口→退出）: %v\n", time.Since(t0).Round(100*time.Microsecond))
+	}
 	return code
 }
 
@@ -136,6 +158,7 @@ flags:
   --runc PATH      runc 可执行文件路径；缺省在 PATH 中查找
   --timeout DUR    容器运行超时（如 30s）；0 表示不限
   --keep-bundle    退出后保留 bundle 目录（调试用）
+  --timing         打印各阶段耗时（测启动开销用）
 
 示例:
   anolix run --policy examples/policy.json --rootfs ./rootfs -- /probe

@@ -242,14 +242,6 @@ stat("/usr/local/bin/grep",  …) = -1 EPERM
 4. "上游死"不连坐容器（anolix、sudo 两轮均已实证），三种结局对照见表 5.4；
 5. `*_for_children` 中间态已实测：unshare 后未 fork 时 `pid ≠ pid_for_children`（旧房间 4026532221 / 新房间 4026532232）——这就是"runc 先 unshare 再 fork"的根据。
 
-### 7.2 待续实验
-
-| # | 实验 | 观测点 | 状态 |
-| --- | --- | --- | --- |
-| 1 | `*_for_children` 中间态（第四章） | unshare 后未 fork 的进程 | **已实证（第四章）** |
-| 2 | time ns（未隔离维度的对照） | timens_offsets 与 CLOCK_MONOTONIC 偏移 | 待执行 |
-| 3 | 禁嵌套：容器内 `unshare -u` / `sysc 272` | 预期 1145（名单未放行 unshare） | 待执行 |
-| 4 | 名单补 `stat`（及候选 `lstat`） | 裸名命令恢复可用 | 待实现 |
 
 ---
 

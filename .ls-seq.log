@@ -1,0 +1,178 @@
+execve("rootfs/bin/busybox", ["rootfs/bin/busybox", "ls", "/proc"], 0x7ffe70607c40 /* 41 vars */) = 0
+arch_prctl(ARCH_SET_FS, 0x713198)       = 0
+set_tid_address(0x713fd4)               = 324684
+getuid()                                = 1000
+stat("/etc/busybox.conf", 0x7ffdf6ca4220) = -1 ENOENT (No such file or directory)
+getgid()                                = 1000
+rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+rt_sigprocmask(SIG_BLOCK, ~[], NULL, 8) = 0
+setgid(1000)                            = 0
+rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+rt_sigprocmask(SIG_BLOCK, ~[], NULL, 8) = 0
+setuid(1000)                            = 0
+rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+ioctl(0, TIOCGWINSZ, 0x7ffdf6ca4348)    = -1 ENOTTY (Inappropriate ioctl for device)
+ioctl(1, TIOCGWINSZ, 0x7ffdf6ca4388)    = -1 ENOTTY (Inappropriate ioctl for device)
+ioctl(1, TIOCGWINSZ, 0x7ffdf6ca4388)    = -1 ENOTTY (Inappropriate ioctl for device)
+brk(NULL)                               = 0x281b7000
+brk(0x281b9000)                         = 0x281b9000
+mmap(0x281b7000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x281b7000
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab8260000
+stat("/proc", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+open("/proc", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3
+fcntl(3, F_SETFD, FD_CLOEXEC)           = 0
+mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825e000
+getdents64(3, 0x708ab825e048 /* 69 entries */, 2048) = 2032
+lstat("/proc/fb", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/fs", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/bus", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/dma", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/irq", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/mpt", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/net", {st_mode=S_IFLNK|0777, st_size=8, ...}) = 0
+lstat("/proc/sys", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/tty", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/acpi", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/keys", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/kmsg", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/misc", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/mtrr", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+lstat("/proc/scsi", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/stat", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/iomem", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/kcore", {st_mode=S_IFREG|0400, st_size=140737471598592, ...}) = 0
+lstat("/proc/locks", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/swaps", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/crypto", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/driver", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/mounts", {st_mode=S_IFLNK|0777, st_size=11, ...}) = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825d000
+lstat("/proc/uptime", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/vmstat", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/cgroups", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/cmdline", {st_mode=S_IFREG|0444, st_size=146, ...}) = 0
+lstat("/proc/cpuinfo", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/devices", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/ioports", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/loadavg", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/meminfo", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/modules", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/sysvipc", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/version", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/consoles", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/kallsyms", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/pressure", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/slabinfo", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/softirqs", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/zoneinfo", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/buddyinfo", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/config.gz", {st_mode=S_IFREG|0444, st_size=50653, ...}) = 0
+lstat("/proc/diskstats", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/key-users", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/schedstat", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/interrupts", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825c000
+lstat("/proc/kpagecount", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/kpageflags", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/partitions", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/timer_list", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/execdomains", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/filesystems", {st_mode=S_IFREG|0444, st_size=0, ...}) = 0
+lstat("/proc/kpagecgroup", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/vmallocinfo", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/pagetypeinfo", {st_mode=S_IFREG|0400, st_size=0, ...}) = 0
+lstat("/proc/dynamic_debug", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/latency_stats", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+lstat("/proc/sysrq-trigger", {st_mode=S_IFREG|0200, st_size=0, ...}) = 0
+lstat("/proc/self", {st_mode=S_IFLNK|0777, st_size=0, ...}) = 0
+lstat("/proc/thread-self", {st_mode=S_IFLNK|0777, st_size=0, ...}) = 0
+lstat("/proc/1", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/2", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/7", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/57", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/88", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/184", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+getdents64(3, 0x708ab825e048 /* 64 entries */, 2048) = 1728
+lstat("/proc/186", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/195", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/196", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/199", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825b000
+lstat("/proc/208", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/213", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/221", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/240", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/241", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/245", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/247", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/248", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/249", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/250", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/252", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/255", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/256", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/257", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/258", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/260", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/261", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/262", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/263", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/264", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/265", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/266", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/275", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/276", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/283", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/355", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/613", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/615", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/679", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/680", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/713", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/805", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/815", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/1003", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/1004", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/2044", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825a000
+lstat("/proc/22823", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/22825", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/22827", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23403", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23446", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23475", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23516", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23523", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/23535", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37447", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37448", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37449", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37456", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37457", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/37458", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/260876", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/260887", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/269379", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab8259000
+lstat("/proc/269390", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/271518", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/274577", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/324675", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/324681", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+lstat("/proc/324684", {st_mode=S_IFDIR|0555, st_size=0, ...}) = 0
+getdents64(3, 0x708ab825e048 /* 0 entries */, 2048) = 0
+close(3)                                = 0
+munmap(0x708ab825e000, 8192)            = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x708ab825f000
+ioctl(1, TIOCGWINSZ, 0x7ffdf6ca42a8)    = -1 ENOTTY (Inappropriate ioctl for device)
+writev(1, [{iov_base="1", iov_len=1}, {iov_base="\n", iov_len=1}], 2) = 2
+munmap(0x708ab8259000, 4096)            = 0
+munmap(0x708ab825a000, 4096)            = 0
+munmap(0x708ab825b000, 4096)            = 0
+munmap(0x708ab825c000, 4096)            = 0
+munmap(0x708ab825d000, 4096)            = 0
+munmap(0x708ab825f000, 4096)            = 0
+writev(1, [{iov_base="1003\n1004\n184\n186\n195\n196\n199\n2\n"..., iov_len=817}, {iov_base=NULL, iov_len=0}], 2) = 817
+exit_group(0)                           = ?
++++ exited with 0 +++
