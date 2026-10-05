@@ -1,0 +1,327 @@
+{
+  "ociVersion": "1.2.1",
+  "process": {
+    "user": {
+      "uid": 0,
+      "gid": 0
+    },
+    "args": [
+      "/sysc",
+      "162"
+    ],
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "TERM=xterm",
+      "HOSTNAME=anolix"
+    ],
+    "cwd": "/",
+    "capabilities": {},
+    "rlimits": [
+      {
+        "type": "RLIMIT_NOFILE",
+        "hard": 1024,
+        "soft": 1024
+      }
+    ],
+    "noNewPrivileges": true
+  },
+  "root": {
+    "path": "/home/sh1rogane/Anolix/rootfs"
+  },
+  "hostname": "anolix",
+  "mounts": [
+    {
+      "destination": "/proc",
+      "type": "proc",
+      "source": "proc",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    },
+    {
+      "destination": "/dev",
+      "type": "tmpfs",
+      "source": "tmpfs",
+      "options": [
+        "nosuid",
+        "strictatime",
+        "mode=755",
+        "size=65536k"
+      ]
+    },
+    {
+      "destination": "/dev/pts",
+      "type": "devpts",
+      "source": "devpts",
+      "options": [
+        "nosuid",
+        "noexec",
+        "newinstance",
+        "ptmxmode=0666",
+        "mode=0620"
+      ]
+    },
+    {
+      "destination": "/dev/shm",
+      "type": "tmpfs",
+      "source": "shm",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=65536k"
+      ]
+    },
+    {
+      "destination": "/dev/mqueue",
+      "type": "mqueue",
+      "source": "mqueue",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    },
+    {
+      "destination": "/sys",
+      "type": "sysfs",
+      "source": "sysfs",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "ro"
+      ]
+    }
+  ],
+  "linux": {
+    "uidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 1000,
+        "size": 1
+      }
+    ],
+    "gidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 1000,
+        "size": 1
+      }
+    ],
+    "resources": {
+      "devices": [
+        {
+          "allow": false,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 3,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 5,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 7,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 8,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 9,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 5,
+          "minor": 0,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 5,
+          "minor": 2,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 136,
+          "minor": -1,
+          "access": "rwm"
+        }
+      ]
+    },
+    "namespaces": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "pid"
+      },
+      {
+        "type": "network"
+      },
+      {
+        "type": "ipc"
+      },
+      {
+        "type": "uts"
+      },
+      {
+        "type": "mount"
+      },
+      {
+        "type": "cgroup"
+      },
+      {
+        "type": "time"
+      }
+    ],
+    "seccomp": {
+      "defaultAction": "SCMP_ACT_ERRNO",
+      "defaultErrnoRet": 1145,
+      "syscalls": [
+        {
+          "names": [
+            "access",
+            "arch_prctl",
+            "brk",
+            "capget",
+            "chdir",
+            "clock_getres",
+            "clock_gettime",
+            "clock_nanosleep",
+            "clone",
+            "clone3",
+            "close",
+            "dup",
+            "dup2",
+            "dup3",
+            "epoll_create1",
+            "epoll_ctl",
+            "epoll_pwait",
+            "epoll_wait",
+            "eventfd2",
+            "execve",
+            "exit",
+            "exit_group",
+            "faccessat",
+            "faccessat2",
+            "fcntl",
+            "fork",
+            "fstat",
+            "fstatfs",
+            "futex",
+            "getcwd",
+            "getdents64",
+            "getegid",
+            "geteuid",
+            "getgid",
+            "getpid",
+            "getppid",
+            "getrandom",
+            "getrlimit",
+            "getrusage",
+            "gettid",
+            "getuid",
+            "ioctl",
+            "kill",
+            "lseek",
+            "madvise",
+            "mmap",
+            "mprotect",
+            "mremap",
+            "munmap",
+            "nanosleep",
+            "newfstatat",
+            "open",
+            "openat",
+            "pipe",
+            "pipe2",
+            "poll",
+            "ppoll",
+            "prlimit64",
+            "read",
+            "readlinkat",
+            "rseq",
+            "rt_sigaction",
+            "rt_sigprocmask",
+            "rt_sigreturn",
+            "sched_getaffinity",
+            "sched_setaffinity",
+            "sched_yield",
+            "set_robust_list",
+            "set_tid_address",
+            "setrlimit",
+            "sigaltstack",
+            "statx",
+            "tgkill",
+            "times",
+            "uname",
+            "unlink",
+            "unlinkat",
+            "vfork",
+            "wait4",
+            "waitid",
+            "write",
+            "writev",
+            "newfstatat",
+            "getdents64",
+            "ioctl",
+            "stat",
+            "lstat",
+            "setuid",
+            "setgid"
+          ],
+          "action": "SCMP_ACT_ALLOW"
+        }
+      ]
+    },
+    "maskedPaths": [
+      "/proc/acpi",
+      "/proc/asound",
+      "/proc/kcore",
+      "/proc/keys",
+      "/proc/latency_stats",
+      "/proc/timer_list",
+      "/proc/timer_stats",
+      "/proc/sched_debug",
+      "/proc/scsi",
+      "/sys/firmware",
+      "/sys/devices/virtual/powercap"
+    ],
+    "readonlyPaths": [
+      "/proc/asound",
+      "/proc/bus",
+      "/proc/fs",
+      "/proc/irq",
+      "/proc/sys",
+      "/proc/sysrq-trigger"
+    ]
+  }
+}
