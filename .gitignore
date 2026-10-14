@@ -22,6 +22,9 @@ coverage.*
 /.tmpgm/
 /.tmprs/
 
+# kprof.py 测试临时目录（bundle/state/最小策略/负载文件）
+/.kprof-tmp/
+
 # Python 缓存
 __pycache__/
 *.pyc
@@ -31,3 +34,6 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# 构建产物
+/bin/
