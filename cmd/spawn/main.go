@@ -9,9 +9,9 @@
 //	spawn --socket /tmp/anolix-zygote.sock --id worker-1 -- /bin/busybox sleep 60
 //	spawn --socket /tmp/anolix-zygote.sock -- /bin/busybox sh -c 'echo hello; sleep 10'
 //
-// 设计对照（bytedanceDoc 方案 B）：
-//   - 文档：宿主侧 runc_spawn_v3.py，发送 0x5A59 触发，写 state.json 注册
-//   - 本实现：Go 二进制，JSON 协议，返回宿主 PID（state.json 注册为后续迭代）
+// 设计要点：
+//   - JSON 协议触发母体 clone worker，返回 worker 的宿主 PID
+//   - 拿到 PID 即可 kill/管理；写 runc state.json 让运行时纳管为后续迭代
 package main
 
 import (

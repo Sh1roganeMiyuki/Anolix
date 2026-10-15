@@ -1,26 +1,23 @@
-// Package zygote 实现"母体预热 + double-fork 生成 worker"协议。
+// Package zygote 实现"母体预热 + 快拉隔离 worker"机制。
 //
-// 架构概览（对照 bytedanceDoc 方案 B）：
+// 架构概览：
 //
 //	┌─────────────────────────────────────────────────────────┐
 //	│  宿主                                                    │
 //	│                                                          │
 //	│  spawn client ──AF_UNIX──► zygote mother (常驻)          │
 //	│                                │                         │
-//	│                          fork#1 (intermediate)           │
+//	│                       clone(CLONE_NEW* 6 间房)           │
 //	│                                │                         │
-//	│                          unshare(6 ns)                   │
-//	│                                │                         │
-//	│                          fork#2 (worker)                 │
-//	│                                │                         │
+//	│                                ▼                         │
 //	│                          worker: PID=1 in new PID ns     │
 //	│                                  host PID 直传回 client   │
 //	└─────────────────────────────────────────────────────────┘
 //
 // 核心设计点：
-//   - 母体不在 PID namespace 中 → fork#2 返回值即宿主 PID（无需 /proc 扫描）
-//   - 每次 spawn 一个一次性 intermediate → 每个 worker 拥有独立的 6 间房
-//   - intermediate 退出后 worker 被 reparent → 母体不需管理 worker 生命周期
+//   - 母体不在 PID namespace 中 → clone 返回值即宿主 PID（无需 /proc 扫描）
+//   - 一句 clone 带 6 个 CLONE_NEW* → 每个 worker 拥有独立的 6 间房
+//   - worker 是母体直接子进程 → 母体用后台 goroutine Wait 收尸
 package zygote
 
 import (

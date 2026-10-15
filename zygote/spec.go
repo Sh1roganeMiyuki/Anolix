@@ -1,6 +1,6 @@
 // spec.go 生成母体容器的 OCI runtime spec。
 //
-// 母体与普通 Anolix 沙箱的关键差异（对照 bytedanceDoc 方案 B）：
+// 母体与普通 Anolix 沙箱的关键差异：
 //
 //	┌────────────────┬──────────────────────┬──────────────────────────────┐
 //	│ 维度           │ 普通沙箱 (launcher/)  │ 母体容器 (本文件)             │
@@ -13,15 +13,13 @@
 //	└────────────────┴──────────────────────┴──────────────────────────────┘
 //
 // 为什么母体不带 PID namespace：
-//   - 核心设计点：intermediate fork#2 的返回值"天然就是宿主 PID"
-//   - 如果母体在 PID ns 中，fork 返回的是 ns 内 PID，需要额外扫描 /proc 反查宿主 PID
-//   - 文档原文："母体自身不在独立 PID namespace 中运行（config 无 pid ns），
-//     因此中间进程 fork #2 返回的 PID 即为宿主 PID，无需 /proc 扫描"
+//   - 核心设计点：母体 clone 出的 worker，其返回值"天然就是宿主 PID"
+//   - 如果母体在 PID ns 中，clone 返回的是 ns 内 PID，需要额外扫描 /proc 反查宿主 PID
 //
 // 安全代价：
 //   - 母体持有 CAP_SYS_ADMIN + 无 seccomp → 它本身是"受信进程"
 //   - 这是 zygote 架构的固有取舍：母体的信任等级必须高于普通沙箱
-//   - worker 仍然拥有完整的 6 间房隔离（由 intermediate 的 unshare 保证）
+//   - worker 仍然拥有完整的 6 间房隔离（由 clone 的 CLONE_NEW* flags 保证）
 package zygote
 
 import (

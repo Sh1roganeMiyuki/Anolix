@@ -38,7 +38,7 @@ const (
 )
 
 // CreateWarmMemfd 创建一个 memfd，写入 header + size 字节的确定性 pattern，
-// 模拟母体"已加载好的重型状态"（如 torch 模型权重）。
+// 模拟母体"已加载好的重型状态"（如重型运行时、模型权重、预热缓存）。
 //
 // 返回的 *os.File 由母体持有（保持 memfd 存活），并在每次 spawn 时
 // 通过 cmd.ExtraFiles 传给 worker。

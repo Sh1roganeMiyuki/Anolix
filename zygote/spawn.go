@@ -1,6 +1,6 @@
 // spawn.go 实现 worker 生成：直接用 clone(2) 带 namespace flags，一步到位。
 //
-// 对照 bytedanceDoc 方案 B 的演进（旧 double-fork 版已入 git 历史）：
+// 本实现的演进（旧 double-fork 版已入 git 历史）：
 //
 //	旧版（double-fork + unshare）：
 //	  mother ──fork#1──► intermediate ──unshare(6ns)──► fork#2 ──► worker
@@ -12,8 +12,8 @@
 //	  省掉 intermediate：Go 的 SysProcAttr.Cloneflags 把 flags 透给 clone(2)，
 //	  内核在 clone 那一刻原子建好 namespace——无需 unshare、无需中间进程。
 //
-// 为什么 Go 能一步、文档（Python）要两步：
-//   - Python：os.fork() 不带 flags，只能 unshare()+fork()；且 unshare 改的是调用者自己，
+// 为什么 Go 能一步、而 unshare 路径要两步：
+//   - unshare 路径（如 Python 的 os.unshare + os.fork）：unshare 改的是调用者自己，
 //     母体不能去 unshare → 必须借道一次性中间进程。这是"机制选型"逼出来的，不是语言高下。
 //   - Go：exec.Cmd.SysProcAttr.Cloneflags 直接支持 clone flags → 一步 clone 出带 ns 的孩子。
 //     （C 同理：runc 的 nsexec.c 就是 clone 带 flags。）
@@ -31,7 +31,7 @@ import (
 	"syscall"
 )
 
-// NamespaceFlags 是 worker 需要隔离的 6 个 namespace（与 bytedanceDoc 一致）。
+// NamespaceFlags 是 worker 需要隔离的 6 个 namespace。
 // 传给 clone(2)：孩子一出生就在这 6 间新房里；其中 CLONE_NEWPID 让孩子成为新 PID ns 的 1 号。
 // 不含 CLONE_NEWUSER（母体以 root 运行，worker 继承 root 身份）。
 const NamespaceFlags = syscall.CLONE_NEWNS |

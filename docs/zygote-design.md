@@ -1,7 +1,8 @@
 # Zygote 预热 Fork 机制：架构设计文档
 
-> 本文件随代码实现同步更新，记录架构决策与对照关系。
-> 对照来源：`notes/bytedanceDoc.md` 方案 B（runc Spawn / fork / zygote）。
+> 本文件随代码实现同步更新，记录架构决策与演进。
+> 动机：削减容器冷启动成本（03 篇实测到容器 init 483 ms），借鉴业界公开的
+> Android Zygote「prefork + 写时复制」与 serverless 快照恢复两类加速思路。
 
 ---
 
@@ -84,24 +85,24 @@ cmd/
 {"host_pid": -1, "error": "clone 失败: operation not permitted"}
 ```
 
-### 3.3 对照 bytedanceDoc
+### 3.3 设计选择
 
-| 文档设计 | 本实现 | 差异原因 |
+| 选择 | 取值 | 原因 |
 |---------|--------|---------|
-| 魔数 0x5A59 | "ZYGO" (4字节) | 更易调试（ASCII 可读） |
-| Python AF_UNIX | Go net.Listen("unix") | 语言选择 |
-| 写 state.json 注册 | 返回 host PID（注册为后续迭代） | 先验证核心机制 |
+| 魔数 | "ZYGO"（4 字节 ASCII） | 抓包/strace 时肉眼可读，便于调试 |
+| 编码 | 长度前缀 + JSON | 自描述、易扩展，性能非瓶颈 |
+| 返回 | 宿主 PID | client 拿到即可 kill / 读 /proc 管理 worker |
 
 ---
 
 ## 四、Worker 生成机制：从 double-fork 到直接 clone
 
-### 4.1 文档为什么用 double-fork（Python 路径）
+### 4.1 为什么 double-fork + 中间进程是一种常见写法
 
-bytedanceDoc 的 intermediate + double-fork 不是随意设计，是被机制逼出来的：
+很多实现（尤其脚本语言）造隔离 worker 时会走"中间进程 + double-fork"，这是被机制逼出来的：
 
 1. **unshare 改的是调用者自己**：`unshare(CLONE_NEWNS/UTS/IPC/NET/CGROUP)` 让调用进程**立即**进入新 ns；`unshare(CLONE_NEWPID)` 让调用进程的**下一个子进程**成为新 PID ns 的 1 号。母体不能去 unshare 自己（否则母体被污染）→ 必须借道一个一次性中间进程。
-2. **Python 的 `os.fork()` 不带 flags**：没法一步 clone 出带 ns 的孩子，只能 `unshare()` + `fork()` 两步 → 中间进程是自然结果。
+2. **`fork()` 不带 flags**：像 Python 的 `os.fork()` 没法一步 clone 出带 ns 的孩子，只能 `unshare()` + `fork()` 两步 → 中间进程是自然结果。
 3. **顺带拿到 reparent**：中间进程退出后 worker 被 reparent，母体免收尸。
 
 ### 4.2 Go 为什么能一步 clone（本实现）
@@ -120,7 +121,7 @@ hostPID := cmd.Process.Pid  // 母体不在 PID ns → 这就是宿主 PID
 ```
 
 - 内核在 clone 那一刻**原子建好 6 间房**，孩子直接是 pid 1 → 不需要 unshare、不需要中间进程。
-- 这不是"Go 比 Python 高级"，是**运行时暴露的 API 不同**：C 也能一步（runc 的 `nsexec.c` 就是 clone 带 flags）；Python 要走一步 clone 得下到 ctypes/preexec_fn，不惯用。
+- 这不是"Go 比别的语言高级"，是**运行时暴露的 API 不同**：C 也能一步（runc 的 `nsexec.c` 就是 clone 带 flags）；脚本语言要走一步 clone 得下到 ctypes/preexec_fn，不惯用。
 - **实测坐实**（strace 母体）：`clone(flags=CLONE_VM|CLONE_PIDFD|CLONE_VFORK|CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD)` → 6 个 `CLONE_NEW*` 一个不少。
 
 ### 4.3 演进：旧版 re-exec 的税
@@ -171,7 +172,7 @@ strace 里 clone 带 `CLONE_VM|CLONE_VFORK` = Go 的 os/exec 用 **vfork**：母
 
 ### 5.1 为什么不用 fork-CoW
 
-zygote 的本意是"worker 继承母体已加载的热状态"。文档用 Python `os.fork()`：子进程 CoW 复制母体地址空间，天然共享 torch 模型页。
+zygote 的经典做法（如 Android Zygote）是 `fork()`：子进程 CoW 复制母体地址空间，天然共享母体已加载的运行时与模型页。
 
 **Go 里这条路是地雷**：runtime 多线程，fork 后子进程只剩一个线程，调度器/GC/锁全坏；"fork 后不 exec、原地续行"会随机死锁/崩溃。所以本实现改用**共享内存**达成同一目标。
 
@@ -192,7 +193,7 @@ worker  → MapWarm(3)：fstat 取大小 → mmap(PROT_READ, MAP_SHARED)
 
 ### 5.3 共享内存 vs fork-CoW
 
-| | fork-CoW（文档/Python） | 共享内存（本实现/Go） |
+| | fork-CoW（Android Zygote） | 共享内存（本实现） |
 |---|---|---|
 | 共享粒度 | 母体整个地址空间 | 显式放进 memfd 的那块 |
 | 写时行为 | 任一 worker 写 → 复制整页（私有化） | MAP_SHARED 写 → 所有 worker 立即可见 |
@@ -205,9 +206,10 @@ worker  → MapWarm(3)：fstat 取大小 → mmap(PROT_READ, MAP_SHARED)
 
 - `in-ns pid=1` + `NSpid: <host> 1` → PID ns 隔离
 - `pattern 校验 OK` → 读到的确实是母体写入的数据（逐字节）
-- `smaps` 的 `Shared_Clean ≈ 整个区`、`Private_Clean ≈ 0` → **物理页真共享**
+- `smaps` 的 `Shared_Dirty ≈ 整个区`、`Private_* ≈ 0` → **物理页真共享**
+- `Pss = 区大小 / N`（N = 并发 worker 数）→ 按共享份数摊薄
 
-> 判读关键：CoW 未写的副本落在 `Private_Clean`；共享内存落在 `Shared_Clean`。两者 smaps 签名不同——这是区分"真共享"与"CoW 副本"的硬证据。多 spawn 几个 worker，各自的 `Pss` 会按共享份数摊薄（N 个共享则各约 1/N），而物理内存总量不随 worker 数线性增长。
+> 判读关键：memfd 被 `write()` 过是脏页，`MAP_SHARED` 映射后落 `Shared_Dirty`（不是 `Shared_Clean`）。`Rss` 每个 worker 都报满额（看着像独占），`Pss` 才按份摊薄——看共享必须看 Pss + Shared/Private 分栏。
 
 ---
 
@@ -249,7 +251,7 @@ sudo ./bin/spawn --socket /tmp/anolix-zygote.sock -- ./bin/worker hold 30
 
 # 4. 验证
 cat /proc/<host_pid>/status | grep NSpid    # 两个字段：宿主 PID + 1
-cat /proc/<host_pid>/smaps | grep -A20 memfd # Shared_Clean ≈ 整个区
+cat /proc/<host_pid>/smaps | grep -A20 memfd # Shared_Dirty ≈ 整个区
 ```
 
 > 母体进 runc 容器（用 `zygote/spec.go` 生成 bundle）是后续迭代；当前实验走宿主直跑最省事。
@@ -270,7 +272,7 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | Cgroup | CLONE_NEWCGROUP | 独立 cgroup 视图 |
 
 验证手段：
-- 宿主侧 `cat /proc/<host_pid>/status | grep NSpid` → 两个字段（已实测：`NSpid: 1138205 1`）
+- 宿主侧 `cat /proc/<host_pid>/status | grep NSpid` → 两个字段（已实测：`NSpid: 1161560 1`）
 - 母体 strace → `clone(flags=...CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET...)`（已实测 6 个全带）
 - worker 内 `getpid()` 返回 1（worker 自打印）
 
@@ -290,18 +292,17 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 
 ---
 
-## 九、与 bytedanceDoc 的对照总结
+## 九、实现状态清单
 
-| 文档概念 | 本实现对应 | 状态 |
+| 能力 | 对应代码 | 状态 |
 |---------|-----------|------|
-| 母体容器 rl-mother-v3 | zygote mother（当前宿主直跑，无 PID ns） | ✅ 已实现 |
-| zygote_mother_v3.py | cmd/zygote/main.go | ✅ 已实现 |
-| AF_UNIX /run/spawn.sock | socket 路径可配（宿主直跑用 /tmp） | ✅ 已实现 |
-| 0x5A59 触发 | "ZYGO" 魔数 + JSON | ✅ 已实现 |
-| double-fork + unshare | **改用 Cloneflags 一步 clone**（旧版入 git 历史） | ✅ 已实现（更优） |
-| host_pid 直传 | cmd.Process.Pid（母体无 PID ns） | ✅ 已实现，NSpid 实测两字段 |
-| runc_spawn_v3.py | cmd/spawn/main.go | ✅ 已实现 |
-| **共享母体热内存** | memfd + MAP_SHARED（非 fork-CoW，Go 里更安全且只读永不复制） | ✅ 已实现 |
-| 写 state.json 收养 | — | 🔜 后续 |
-| worker 日志 /worker-logs/ | spec 里 bind-mount（宿主直跑暂未接） | 🔜 后续 |
-| ~50ms spawn 延迟 | 待脱掉 strace 实测 | 🔜 后续 |
+| 母体守护 + AF_UNIX 触发 | cmd/zygote/main.go、zygote/protocol.go | ✅ 已实现 |
+| 一句 clone 出 6 间房 worker | zygote/spawn.go（Cloneflags） | ✅ 已实现，strace 实测 |
+| 宿主 PID 直传 | cmd.Process.Pid（母体无 PID ns） | ✅ 已实现，NSpid 实测两字段 |
+| 宿主侧 client | cmd/spawn/main.go | ✅ 已实现 |
+| 共享母体热内存 | zygote/warm.go（memfd + MAP_SHARED） | ✅ 已实现，smaps 实测 |
+| worker 自证负载 | cmd/worker/main.go | ✅ 已实现 |
+| 母体 OCI spec（进容器） | zygote/spec.go | 🔜 装置已写，待跑 |
+| state.json 收养（runc 纳管 worker） | — | 🔜 后续 |
+| worker 日志落文件 | — | 🔜 后续 |
+| 延迟稳态数（p50/p95） | — | 🔜 后续 |

@@ -11,11 +11,10 @@
 //	sudo ./zygote --socket /tmp/anolix-zygote.sock
 //	sudo ./zygote --socket /tmp/anolix-zygote.sock --warm 64  # 64MB 共享 memfd，worker mmap 共享
 //
-// 设计对照（bytedanceDoc 方案 B）：
-//   - 文档：母体容器 rl-mother-v3，Python zygote_mother_v3.py，AF_UNIX /run/spawn.sock，
-//     double-fork + unshare（Python 的 os.fork 不带 flags，只能 unshare+fork，故需中间进程）
-//   - 本实现：Go 二进制，AF_UNIX 可配路径；用 SysProcAttr.Cloneflags 一步 clone，
-//     省掉中间进程与那次 re-exec 的 Go 冷启动（旧 double-fork 版已入 git 历史）
+// 设计要点：
+//   - 用 SysProcAttr.Cloneflags 一句 clone 出带 6 间房的 worker，无需中间进程
+//   - 母体不在 PID ns 中 → clone 返回值即宿主 PID，直传回 client
+//   - 旧 double-fork + re-exec 版（多付一次 Go 冷启动）已入 git 历史
 package main
 
 import (
@@ -38,8 +37,8 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	// --- 预热：创建共享 memfd（模拟母体已加载的重型状态） ---
-	// bytedanceDoc 中母体已 import torch + 建好模型（RSS ≈ 660MB），worker fork 后
-	// 通过 CoW 共享这些页。Go 里 fork-continue 不安全，改用 memfd + MAP_SHARED：
+	// 设想母体已完成重型初始化（加载运行时、建好模型），worker 不必各自重来一遍。
+	// Go 里 fork-continue 不安全（多线程 runtime），改用 memfd + MAP_SHARED：
 	// 母体把"热数据"写进一个 memfd，worker 通过 ExtraFiles 拿到 fd 后 mmap 共享同一份物理页。
 	// 只读热状态永不复制，比 fork-CoW 更优（见 zygote/warm.go）。
 	var warmFile *os.File
