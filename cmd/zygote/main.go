@@ -1,15 +1,10 @@
 // Command zygote 是 Anolix 的母体预热守护进程。
 //
-// 两种运行模式（由参数决定）：
-//
-//	zygote                       → 母体模式：监听 AF_UNIX socket，等待 spawn 请求
-//	zygote --zygote-intermediate → 中间进程模式（内部使用，由母体 re-exec 触发）
-//
-// 母体模式是常驻进程，核心职责：
+// 常驻进程，核心职责：
 //  1. 在指定路径监听 Unix socket
-//  2. 收到 spawn 请求后执行 double-fork 协议（见 zygote.SpawnWorker）
+//  2. 收到 spawn 请求后直接 clone 出带 6 间房的 worker（见 zygote.SpawnWorker）
 //  3. 将 worker 的宿主 PID 返回给 client
-//  4. 不管理 worker 生命周期（worker 被 reparent 后独立运行）
+//  4. 后台 goroutine 收尸 worker（worker 是母体的直接子进程）
 //
 // 用法：
 //
@@ -17,8 +12,10 @@
 //	sudo ./zygote --socket /tmp/anolix-zygote.sock --warm 256  # 预热 256MB 模拟重型加载
 //
 // 设计对照（bytedanceDoc 方案 B）：
-//   - 文档：母体容器 rl-mother-v3，Python zygote_mother_v3.py，AF_UNIX /run/spawn.sock
-//   - 本实现：Go 二进制，AF_UNIX 可配路径，相同的 double-fork + unshare 协议
+//   - 文档：母体容器 rl-mother-v3，Python zygote_mother_v3.py，AF_UNIX /run/spawn.sock，
+//     double-fork + unshare（Python 的 os.fork 不带 flags，只能 unshare+fork，故需中间进程）
+//   - 本实现：Go 二进制，AF_UNIX 可配路径；用 SysProcAttr.Cloneflags 一步 clone，
+//     省掉中间进程与那次 re-exec 的 Go 冷启动（旧 double-fork 版已入 git 历史）
 package main
 
 import (
@@ -33,14 +30,6 @@ import (
 )
 
 func main() {
-	// --- 内部模式检测：intermediate ---
-	// 母体通过 re-exec 自身 + --zygote-intermediate 启动中间进程。
-	// 中间进程的执行逻辑完全在 zygote.RunIntermediate() 中（不会返回）。
-	if len(os.Args) >= 2 && os.Args[1] == zygote.IntermediateFlag {
-		zygote.RunIntermediate() // 永不返回
-	}
-
-	// --- 母体模式 ---
 	socketPath := flag.String("socket", "/tmp/anolix-zygote.sock", "AF_UNIX socket 监听路径")
 	warmMB := flag.Int("warm", 0, "预热内存量（MB）：分配并 touch，模拟重型初始化")
 	flag.Parse()
@@ -48,16 +37,13 @@ func main() {
 	log.SetPrefix("zygote-mother: ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	// 获取自身二进制路径（用于 re-exec intermediate）
-	selfExe, err := os.Executable()
-	if err != nil {
-		selfExe = "/proc/self/exe"
-	}
-
 	// --- 预热（模拟母体的"重型初始化"） ---
 	// bytedanceDoc 中母体已 import torch + 建好模型（RSS ≈ 660MB）。
-	// 这里用显式内存分配模拟：分配 + touch → 物理页落地 →
-	// 后续 fork 的 worker 通过 CoW 共享这些页。
+	// 这里用显式内存分配模拟：分配 + touch → 物理页落地。
+	// ⚠️ 注意：当前 worker 走 clone+exec（exec 新程序），会换掉自己的地址空间，
+	// 所以这块预热内存【暂时不会】被 worker 共享——CoW 共享需要 worker fork 后
+	// 不 exec（原地继续跑），那是后续迭代（见 docs/zygote-design.md 第七章）。
+	// 现在保留它只是为了把"母体该预热"这件事在代码里立起来。
 	var warmMem []byte
 	if *warmMB > 0 {
 		warmMem = make([]byte, *warmMB*1024*1024)
@@ -101,12 +87,12 @@ func main() {
 		if err != nil {
 			return
 		}
-		go handleSpawn(conn, selfExe)
+		go handleSpawn(conn)
 	}
 }
 
 // handleSpawn 处理一次 spawn 请求。
-func handleSpawn(conn net.Conn, selfExe string) {
+func handleSpawn(conn net.Conn) {
 	defer conn.Close()
 
 	req, err := zygote.ReadRequest(conn)
@@ -121,7 +107,7 @@ func handleSpawn(conn net.Conn, selfExe string) {
 
 	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, req.WorkerID)
 
-	pid, err := zygote.SpawnWorker(selfExe, req)
+	pid, err := zygote.SpawnWorker(req)
 	if err != nil {
 		log.Printf("spawn 失败: %v", err)
 		zygote.WriteResponse(conn, &zygote.SpawnResponse{
