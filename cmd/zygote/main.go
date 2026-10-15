@@ -26,12 +26,30 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
 	socketPath := flag.String("socket", "/tmp/anolix-zygote.sock", "AF_UNIX socket 监听路径")
 	warmMB := flag.Int("warm", 0, "预热内存量（MB）：创建共享 memfd，worker 将 mmap 共享同一份物理页")
+	cgEnable := flag.Bool("cgroup", false, "给每个 worker 建专属叶子 cgroup（资源围栏）")
+	cgMemMB := flag.Int("cg-memory", 0, "worker 内存上限（MB），0=不限；需配合 --cgroup")
+	cgPids := flag.Int("cg-pids", 0, "worker 进程/线程数上限，0=不限；需配合 --cgroup")
+	cgCPUPct := flag.Int("cg-cpu-pct", 0, "worker CPU 配额百分比（50=半核，200=两核），0=不限；需配合 --cgroup")
 	flag.Parse()
+
+	// 母体默认的 worker 资源围栏（每个 worker 一份；请求里可覆盖）。
+	defLim := zygote.CgroupLimits{}
+	if *cgMemMB > 0 {
+		defLim.MemoryMaxBytes = int64(*cgMemMB) * 1024 * 1024
+	}
+	if *cgPids > 0 {
+		defLim.PidsMax = int64(*cgPids)
+	}
+	if *cgCPUPct > 0 {
+		defLim.CPUQuotaUS = int64(*cgCPUPct) * 1000 // 周期 100ms → 1% = 1000µs
+		defLim.CPUPeriodUS = 100000
+	}
 
 	log.SetPrefix("zygote-mother: ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -82,12 +100,12 @@ func main() {
 		if err != nil {
 			return
 		}
-		go handleSpawn(conn, warmFile)
+		go handleSpawn(conn, warmFile, *cgEnable, defLim)
 	}
 }
 
 // handleSpawn 处理一次 spawn 请求。
-func handleSpawn(conn net.Conn, warmFile *os.File) {
+func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.CgroupLimits) {
 	defer conn.Close()
 
 	req, err := zygote.ReadRequest(conn)
@@ -102,7 +120,29 @@ func handleSpawn(conn net.Conn, warmFile *os.File) {
 
 	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, req.WorkerID)
 
-	pid, err := zygote.SpawnWorker(req, warmFile)
+	// 资源围栏：为这个 worker 建专属叶子 cgroup。
+	// 关键：用 clone3(CLONE_INTO_CGROUP) 让 worker "出生即在册"，没有 #20 的启动空窗。
+	var cg *zygote.WorkerCgroup
+	if cgEnable {
+		lim := defLim
+		if req.Limits != nil {
+			lim = *req.Limits // 请求可覆盖母体默认
+		}
+		id := req.WorkerID
+		if id == "" {
+			id = fmt.Sprintf("w-%d", time.Now().UnixNano())
+		}
+		c, cerr := zygote.CreateWorkerCgroup(id, lim)
+		if cerr != nil {
+			log.Printf("建 cgroup 失败: %v", cerr)
+			zygote.WriteResponse(conn, &zygote.SpawnResponse{HostPID: -1, Error: cerr.Error()})
+			return
+		}
+		cg = c
+		log.Printf("cgroup 叶子已建: %s", cg.Path())
+	}
+
+	pid, err := zygote.SpawnWorker(req, warmFile, cg)
 	if err != nil {
 		log.Printf("spawn 失败: %v", err)
 		zygote.WriteResponse(conn, &zygote.SpawnResponse{

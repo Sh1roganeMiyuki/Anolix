@@ -48,6 +48,7 @@ zygote/
   protocol.go     通信协议：SpawnRequest/Response + 帧编解码
   spawn.go        核心机制：SysProcAttr.Cloneflags 一步 clone 出带 6 间房的 worker
   warm.go         共享热内存：memfd 创建/写入 + worker 侧 mmap + smaps 证据
+  cgroup.go       资源围栏：per-worker 叶子 cgroup + clone3(CLONE_INTO_CGROUP) 出生即在册
   spec.go         母体容器 OCI spec 生成（无 PID ns、有 caps、无 seccomp）
 
 cmd/
@@ -258,7 +259,7 @@ cat /proc/<host_pid>/smaps | grep -A20 memfd # Shared_Dirty ≈ 整个区
 
 ---
 
-## 七、Namespace 隔离保证
+## 七、隔离与资源围栏（Namespace + cgroup）
 
 Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）：
 
@@ -276,6 +277,16 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 - 母体 strace → `clone(flags=...CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET...)`（已实测 6 个全带）
 - worker 内 `getpid()` 返回 1（worker 自打印）
 
+### 7.1 cgroup 资源围栏（per-worker 叶子）
+
+每个 worker 一个专属叶子 cgroup（`/sys/fs/cgroup/anolix-<id>`），可设 `memory.max` / `pids.max` / `cpu.max`。
+
+**关键：用 `clone3(CLONE_INTO_CGROUP)` 消掉启动空窗。** Go 的 `SysProcAttr.UseCgroupFD + CgroupFD` 底层就是它——worker **一出生就落在叶子里**，而不是"先 clone 再写 `cgroup.procs` 迁移"（那样两步之间 worker 已能跑却不受限）。这与"出生就带 ns"是**同一个套路**：不是事后补，是出生就带。
+
+- 归属是"户口"：由**母体**（外部）建叶子、写限额、传 fd；worker 自己够不着宿主 cgroup 层级。
+- 生命周期：worker 退出 → 收尸 goroutine `Destroy()`（关 fd + rmdir 叶子），防泄漏。
+- worker 自带 `CLONE_NEWCGROUP` → 它自己看到的是 ns 根（`/`），**验证要从宿主侧**看 `/sys/fs/cgroup/anolix-<id>/`。
+
 ---
 
 ## 八、已知局限与后续迭代
@@ -286,9 +297,9 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | 无 state.json 注册 | runc list/kill/delete 管不到 worker | 实现收养逻辑（写 runc state 目录） |
 | 母体需要 root | rootless 下 clone 带 CLONE_NEW* 会 EPERM | 加 CLONE_NEWUSER + uid map（复杂度高） |
 | 无 seccomp 继承控制 | worker 继承母体的"无 seccomp"状态 | 母体在 clone 前装 seccomp（worker 继承，只能加严不能放松） |
-| 无 cgroup 限额 | worker 无资源围栏 | 宿主侧为 worker 建叶子 cgroup、写 cgroup.procs 迁移 |
+| ~~无 cgroup 限额~~ | ✅ 已用 per-worker 叶子 + `clone3(CLONE_INTO_CGROUP)` 解决（见 7.1） | 限额已可设；OOM/throttle 的"执法生效"实测待补 |
 
-> **进展**：协议、隔离、宿主 PID 直传、**热内存共享**均已落地并有实测证据。剩下的都是"把它接进真实运行时"的工程活（state.json 收养、seccomp/cgroup 继承、rootless）。
+> **进展**：协议、隔离、宿主 PID 直传、**热内存共享**、**cgroup 资源围栏**均已落地。剩下的都是"把它接进真实运行时"的工程活（state.json 收养、seccomp 继承、rootless）。
 
 ---
 
@@ -301,6 +312,7 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | 宿主 PID 直传 | cmd.Process.Pid（母体无 PID ns） | ✅ 已实现，NSpid 实测两字段 |
 | 宿主侧 client | cmd/spawn/main.go | ✅ 已实现 |
 | 共享母体热内存 | zygote/warm.go（memfd + MAP_SHARED） | ✅ 已实现，smaps 实测 |
+| per-worker cgroup 围栏 | zygote/cgroup.go（clone3 CLONE_INTO_CGROUP） | ✅ 已实现，执法待实测 |
 | worker 自证负载 | cmd/worker/main.go | ✅ 已实现 |
 | 母体 OCI spec（进容器） | zygote/spec.go | 🔜 装置已写，待跑 |
 | state.json 收养（runc 纳管 worker） | — | 🔜 后续 |

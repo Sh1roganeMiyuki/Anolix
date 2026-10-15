@@ -53,9 +53,13 @@ const NamespaceFlags = syscall.CLONE_NEWNS |
 // warmFile：母体的预热 memfd（见 warm.go）。传给它 → worker 能 mmap 共享同一份热数据；
 // 传 nil → worker 不继承共享区（退化为普通 spawn）。
 //
+// cg：worker 专属的叶子 cgroup（见 cgroup.go）。非 nil → 通过 SysProcAttr.UseCgroupFD
+// 让 worker 一出生就落进该 cgroup（clone3 CLONE_INTO_CGROUP，无启动空窗）；
+// 传 nil → 不设资源围栏。worker 退出后由本函数的后台 goroutine 负责 Destroy。
+//
 // 返回的 pid 就是 client 要的"宿主 PID"——可直接用于 kill / 读 /proc/<pid>/status。
 // worker 内部 getpid() 返回 1；/proc/<hostpid>/status 的 NSpid 有两个字段（宿主 PID + ns 内 PID）。
-func SpawnWorker(req *SpawnRequest, warmFile *os.File) (int, error) {
+func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, error) {
 	if req == nil || req.Binary == "" {
 		return 0, fmt.Errorf("请求缺少 binary")
 	}
@@ -67,6 +71,14 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File) (int, error) {
 		// 让 worker 成为新 session leader，脱离母体的终端/会话
 		//（避免后台作业读终端被 SIGTTIN 停住——交接文档里踩过的坑）。
 		Setsid: true,
+	}
+
+	// 资源围栏：让 worker "一出生就落在专属 cgroup 叶子里"。
+	// Go 的 UseCgroupFD + CgroupFD 底层 = clone3(CLONE_INTO_CGROUP)，
+	// 消除了"先 clone 再写 cgroup.procs"的启动空窗（#20）——与 L2"出生就带 ns"同构。
+	if cg != nil {
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = cg.FD()
 	}
 
 	// 把预热 memfd 传给 worker：ExtraFiles[0] → worker 侧的 fd 3（见 warm.go 约定）。
@@ -89,16 +101,19 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File) (int, error) {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		cg.Destroy() // 叶子建了但 worker 没生出来 → 清掉，别泄漏
 		return 0, fmt.Errorf("clone worker 失败: %w", err)
 	}
 
 	// 关键：母体不在 PID namespace 中 → cmd.Process.Pid 就是宿主 PID。
 	hostPID := cmd.Process.Pid
 
-	// 收尸：worker 现在是母体的直接子进程（没有 intermediate 退出触发 reparent）。
-	// 母体是常驻进程，必须自己 Wait，否则 worker 退出后留僵尸。
+	// 收尸 + 清理：worker 是母体的直接子进程（没有 intermediate 退出触发 reparent）。
+	// 母体常驻，必须自己 Wait，否则 worker 退出后留僵尸；
+	// Wait 返回后顺手销毁叶子 cgroup（worker 已死 → 叶子空 → rmdir 成功）。
 	go func() {
 		_ = cmd.Wait()
+		cg.Destroy()
 	}()
 
 	return hostPID, nil

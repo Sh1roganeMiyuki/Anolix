@@ -47,8 +47,11 @@ type SpawnRequest struct {
 	Env []string `json:"env,omitempty"`
 	// Cwd 是 worker 的工作目录；为空时继承母体。
 	Cwd string `json:"cwd,omitempty"`
-	// WorkerID 是可选的标识符（用于日志/注册）。
+	// WorkerID 是可选的标识符（用于日志/注册/cgroup 叶子名）。
 	WorkerID string `json:"worker_id,omitempty"`
+	// Limits 可选：本 worker 的资源围栏覆盖（nil = 用母体启动时的默认值）。
+	// 让不同 worker 能有不同的 cgroup 限额（见 cgroup.go）。
+	Limits *CgroupLimits `json:"limits,omitempty"`
 }
 
 // SpawnResponse 是 mother → client 的 spawn 响应。
