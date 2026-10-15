@@ -14,29 +14,29 @@
 │  ┌──────────┐    AF_UNIX     ┌──────────────────────────────┐   │
 │  │ spawn    │───────────────►│ zygote mother (常驻守护)      │   │
 │  │ client   │◄───────────────│                              │   │
-│  └──────────┘   host PID     │  已预热（模拟 import torch）  │   │
+│  └──────────┘   host PID     │  持有 warm memfd（热数据）    │   │
 │                              │  不在 PID namespace 中        │   │
 │                              └──────────┬───────────────────┘   │
 │                                         │                        │
-│                       clone(CLONE_NEW* 6 间房)                   │
-│                       （一步到位，无中间进程）                     │
+│                    clone(CLONE_NEW* 6 间房) + ExtraFiles(memfd)   │
+│                    （一步到位，无中间进程）                        │
 │                                         │                        │
 │                                         ▼                        │
 │                              ┌──────────────────────┐            │
 │                              │ worker               │            │
 │                              │ PID=1 in new PID ns  │            │
-│                              │ 独立 MNT/UTS/IPC/    │            │
-│                              │ NET/CGROUP ns        │            │
-│                              │ exec payload 命令     │            │
+│                              │ mmap memfd MAP_SHARED│            │
+│                              │ → 共享母体热数据      │            │
 │                              └──────────────────────┘            │
 │                                                                  │
 │  worker 是 mother 的直接子进程 → mother 用后台 goroutine Wait 收尸 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-> **演进说明**：旧版走 double-fork + unshare（re-exec 一个 Go 中间进程），strace 实测那段
-> Go 冷启动约 25ms，是纯税。现版改用 `SysProcAttr.Cloneflags` 一步 clone，去掉中间进程。
-> 旧 double-fork 版已入 git 历史。
+> **演进说明**：
+> - v1（double-fork + unshare，re-exec 一个 Go 中间进程）：strace 实测中间进程 Go 冷启动约 25ms，是纯税。已入 git 历史。
+> - v2（直接 clone）：`SysProcAttr.Cloneflags` 一步 clone 出带 6 间房的 worker，去掉中间进程。
+> - v3（共享热内存，当前）：memfd + MAP_SHARED，worker 共享母体热数据。
 
 ---
 
@@ -46,10 +46,12 @@
 zygote/
   protocol.go     通信协议：SpawnRequest/Response + 帧编解码
   spawn.go        核心机制：SysProcAttr.Cloneflags 一步 clone 出带 6 间房的 worker
+  warm.go         共享热内存：memfd 创建/写入 + worker 侧 mmap + smaps 证据
   spec.go         母体容器 OCI spec 生成（无 PID ns、有 caps、无 seccomp）
 
 cmd/
-  zygote/main.go  母体守护进程入口
+  zygote/main.go  母体守护进程入口（创建共享 memfd）
+  worker/main.go  worker 负载：映射共享区、校验、打印共享证据
   spawn/main.go   宿主侧 spawn 客户端
 ```
 
@@ -68,8 +70,8 @@ cmd/
 ```json
 // 请求
 {
-  "binary": "/probe",
-  "args": ["hold", "60"],
+  "binary": "/path/to/bin/worker",
+  "args": ["hold", "30"],
   "env": ["PATH=/bin"],
   "cwd": "/",
   "worker_id": "worker-1"
@@ -119,6 +121,7 @@ hostPID := cmd.Process.Pid  // 母体不在 PID ns → 这就是宿主 PID
 
 - 内核在 clone 那一刻**原子建好 6 间房**，孩子直接是 pid 1 → 不需要 unshare、不需要中间进程。
 - 这不是"Go 比 Python 高级"，是**运行时暴露的 API 不同**：C 也能一步（runc 的 `nsexec.c` 就是 clone 带 flags）；Python 要走一步 clone 得下到 ctypes/preexec_fn，不惯用。
+- **实测坐实**（strace 母体）：`clone(flags=CLONE_VM|CLONE_PIDFD|CLONE_VFORK|CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET|SIGCHLD)` → 6 个 `CLONE_NEW*` 一个不少。
 
 ### 4.3 演进：旧版 re-exec 的税
 
@@ -131,7 +134,7 @@ hostPID := cmd.Process.Pid  // 母体不在 PID ns → 这就是宿主 PID
 | unshare(6ns) | ~6.5ms | 新版由 clone flags 承担 |
 | fork#2 + exec worker | ~5.3ms | 保留 |
 
-新版砍掉中间进程 → 那 ~25ms 的 Go-init 税直接消失。（数字为 `strace -f` 下，含插桩膨胀，看相对比例；且各段放大不均——syscall 多的段被放大更狠。）
+新版砍掉中间进程 → 那 ~25ms 的 Go-init 税直接消失。母体侧窗口从 ~43ms（strace 下，4 段）降到 ~11.6ms（1 句 clone）。
 
 ### 4.4 新版时序图
 
@@ -139,12 +142,11 @@ hostPID := cmd.Process.Pid  // 母体不在 PID ns → 这就是宿主 PID
 mother                              worker
   │                                   │
   │── clone(CLONE_NEW* 6 间房) ──────►│
-  │   (cmd.Start，一步)                │── 出生即 pid 1
-  │                                   │── exec payload
-  │◄── cmd.Process.Pid = host PID ────│
+  │   + ExtraFiles(memfd→fd3)         │── 出生即 pid 1
+  │   (cmd.Start，一步)                │── exec worker
+  │◄── cmd.Process.Pid = host PID ────│── mmap fd3 MAP_SHARED
   │                                   │
   │── response: {host_pid} ── client  │── 独立运行
-  │                                   │
   │   (后台 goroutine: cmd.Wait 收尸)  │
 ```
 
@@ -156,11 +158,62 @@ mother                              worker
 - 实现：`SpawnWorker` 里起一个后台 goroutine `cmd.Wait()`（见 `spawn.go`）。
 - 这是小账（一个 goroutine），换掉的是 ~25ms 的 Go-init 税。
 
+### 4.6 一个结构性事实：vfork
+
+strace 里 clone 带 `CLONE_VM|CLONE_VFORK` = Go 的 os/exec 用 **vfork**：母体被挂起直到 worker `execve`。所以：
+
+- "spawn 延迟"里天然含了 worker 的 execve。
+- **vfork 正是"要 exec"的症状**——真正的 no-exec zygote（子进程原地续行）不能用 vfork，得用普通 fork（才有 CoW）。这也是为什么共享热内存走了 memfd 而不是 fork-CoW（见第五章）。
+
 ---
 
-## 五、母体容器 Spec 设计
+## 五、共享热内存（memfd + MAP_SHARED）
 
-### 5.1 与普通沙箱的差异
+### 5.1 为什么不用 fork-CoW
+
+zygote 的本意是"worker 继承母体已加载的热状态"。文档用 Python `os.fork()`：子进程 CoW 复制母体地址空间，天然共享 torch 模型页。
+
+**Go 里这条路是地雷**：runtime 多线程，fork 后子进程只剩一个线程，调度器/GC/锁全坏；"fork 后不 exec、原地续行"会随机死锁/崩溃。所以本实现改用**共享内存**达成同一目标。
+
+### 5.2 机制
+
+```
+母体启动 → CreateWarmMemfd(size)：memfd_create + 写 [magic|size|pattern]
+        → 持有 *os.File（保持 memfd 存活）
+spawn 时 → cmd.ExtraFiles = [warmFile] → worker 侧固定拿到 fd 3
+worker  → MapWarm(3)：fstat 取大小 → mmap(PROT_READ, MAP_SHARED)
+        → 校验 magic + 逐字节 pattern → 读 smaps 看共享页
+```
+
+- **memfd**：匿名文件，活在内存里，不占文件系统路径；所有引用关闭即自动回收。
+- **MAP_SHARED + 同一个 memfd**：母体与所有 worker 映射到**同一批物理页**，零拷贝。
+- **fd 传递**：靠 `ExtraFiles`（exec 继承 fd 3），不需要 SCM_RIGHTS，也不需要文件路径。
+- **memfd 跨 namespace**：fd 不依赖挂载 ns，worker 在新 mount ns 里照样能 mmap。
+
+### 5.3 共享内存 vs fork-CoW
+
+| | fork-CoW（文档/Python） | 共享内存（本实现/Go） |
+|---|---|---|
+| 共享粒度 | 母体整个地址空间 | 显式放进 memfd 的那块 |
+| 写时行为 | 任一 worker 写 → 复制整页（私有化） | MAP_SHARED 写 → 所有 worker 立即可见 |
+| 只读热状态 | 共享，但一写就分裂 | **始终共享，永不复制** |
+| Go 可行性 | 不安全（多线程 runtime） | 安全、原生 |
+
+对"只读热状态"（模型权重、词表、预热缓存），共享内存其实**比 CoW 更优**——CoW 在首次写时会把整页私有化，共享内存则一直共享。
+
+### 5.4 验证证据（worker 自打印）
+
+- `in-ns pid=1` + `NSpid: <host> 1` → PID ns 隔离
+- `pattern 校验 OK` → 读到的确实是母体写入的数据（逐字节）
+- `smaps` 的 `Shared_Clean ≈ 整个区`、`Private_Clean ≈ 0` → **物理页真共享**
+
+> 判读关键：CoW 未写的副本落在 `Private_Clean`；共享内存落在 `Shared_Clean`。两者 smaps 签名不同——这是区分"真共享"与"CoW 副本"的硬证据。多 spawn 几个 worker，各自的 `Pss` 会按共享份数摊薄（N 个共享则各约 1/N），而物理内存总量不随 worker 数线性增长。
+
+---
+
+## 六、母体容器 Spec 设计
+
+### 6.1 与普通沙箱的差异
 
 母体是"受信基础设施"，不是"被隔离的不可信负载"：
 
@@ -172,7 +225,7 @@ mother                              worker
 | NNP | true | **false** | caps 需要 |
 | MNT/UTS/IPC/NET/CGROUP | 有 | 有 | 母体自身仍需部分隔离 |
 
-### 5.2 Socket 通信路径
+### 6.2 Socket 通信路径
 
 ```
 宿主侧：  <socketDir>/spawn.sock     ← client 连接这里
@@ -180,28 +233,30 @@ mother                              worker
           ↑ 同一个文件（bind-mount）
 ```
 
-### 5.3 启动方式
+### 6.3 启动方式
 
 ```bash
-# 1. 构建（母体若要放进容器 rootfs，需静态编译）
-CGO_ENABLED=0 go build -o rootfs/zygote ./cmd/zygote
-go build -o bin/spawn ./cmd/spawn
+# 1. 构建
+go build -o bin/zygote ./cmd/zygote
+go build -o bin/spawn  ./cmd/spawn
+go build -o bin/worker ./cmd/worker
 
-# 2. 宿主直跑（实验最简路径，需 root：clone 带 CLONE_NEW* 要 CAP_SYS_ADMIN）
+# 2. 宿主直跑母体（需 root：clone 带 CLONE_NEW* 要 CAP_SYS_ADMIN）
 sudo ./bin/zygote --socket /tmp/anolix-zygote.sock --warm 64
 
-# 3. Spawn worker
-sudo ./bin/spawn --socket /tmp/anolix-zygote.sock -- /bin/busybox sleep 30
+# 3. Spawn 一个共享热内存的 worker
+sudo ./bin/spawn --socket /tmp/anolix-zygote.sock -- ./bin/worker hold 30
 
-# 4. 验证 worker 隔离
-cat /proc/<host_pid>/status | grep NSpid   # 应见两个字段：宿主 PID + ns 内 PID(=1)
+# 4. 验证
+cat /proc/<host_pid>/status | grep NSpid    # 两个字段：宿主 PID + 1
+cat /proc/<host_pid>/smaps | grep -A20 memfd # Shared_Clean ≈ 整个区
 ```
 
 > 母体进 runc 容器（用 `zygote/spec.go` 生成 bundle）是后续迭代；当前实验走宿主直跑最省事。
 
 ---
 
-## 六、Namespace 隔离保证
+## 七、Namespace 隔离保证
 
 Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）：
 
@@ -214,29 +269,28 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | Network | CLONE_NEWNET | 无网络（只有 down 的 loopback） |
 | Cgroup | CLONE_NEWCGROUP | 独立 cgroup 视图 |
 
-验证手段（worker 内部 / 宿主侧）：
-- 宿主侧 `cat /proc/<host_pid>/status | grep NSpid` → 两个字段（已实测：`NSpid: 1126656 1`）
-- worker 内 `getpid()` 应返回 1
-- worker 内 `hostname` 应与母体不同
-- worker 内 `ip addr` 应只有 lo（且 DOWN）
+验证手段：
+- 宿主侧 `cat /proc/<host_pid>/status | grep NSpid` → 两个字段（已实测：`NSpid: 1138205 1`）
+- 母体 strace → `clone(flags=...CLONE_NEWNS|CLONE_NEWCGROUP|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWPID|CLONE_NEWNET...)`（已实测 6 个全带）
+- worker 内 `getpid()` 返回 1（worker 自打印）
 
 ---
 
-## 七、已知局限与后续迭代
+## 八、已知局限与后续迭代
 
 | 局限 | 影响 | 后续方案 |
 |------|------|---------|
-| **worker 走 clone+exec → 不共享母体堆** | `--warm` 的预热内存对 worker 零贡献；CoW 仅限二进制页 | 实现"no-exec worker"：raw clone 后原地继续跑（Go 需 C helper / 单线程设计），才是真 zygote |
+| ~~worker 不共享母体热内存~~ | ✅ 已用 memfd+MAP_SHARED 解决（见第五章） | 只读热状态已共享；若要共享母体"活对象"（非 blob），仍需 no-exec fork（Go 不安全） |
 | 无 state.json 注册 | runc list/kill/delete 管不到 worker | 实现收养逻辑（写 runc state 目录） |
 | 母体需要 root | rootless 下 clone 带 CLONE_NEW* 会 EPERM | 加 CLONE_NEWUSER + uid map（复杂度高） |
 | 无 seccomp 继承控制 | worker 继承母体的"无 seccomp"状态 | 母体在 clone 前装 seccomp（worker 继承，只能加严不能放松） |
 | 无 cgroup 限额 | worker 无资源围栏 | 宿主侧为 worker 建叶子 cgroup、写 cgroup.procs 迁移 |
 
-> **最重要的一条**：当前实现证明了"协议通 + 隔离对 + 宿主 PID 直传"，但**还没拿到 zygote 的核心价值（CoW 共享热内存）**——因为 worker exec 了新程序。这是下一版要攻的点。
+> **进展**：协议、隔离、宿主 PID 直传、**热内存共享**均已落地并有实测证据。剩下的都是"把它接进真实运行时"的工程活（state.json 收养、seccomp/cgroup 继承、rootless）。
 
 ---
 
-## 八、与 bytedanceDoc 的对照总结
+## 九、与 bytedanceDoc 的对照总结
 
 | 文档概念 | 本实现对应 | 状态 |
 |---------|-----------|------|
@@ -247,7 +301,7 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | double-fork + unshare | **改用 Cloneflags 一步 clone**（旧版入 git 历史） | ✅ 已实现（更优） |
 | host_pid 直传 | cmd.Process.Pid（母体无 PID ns） | ✅ 已实现，NSpid 实测两字段 |
 | runc_spawn_v3.py | cmd/spawn/main.go | ✅ 已实现 |
+| **共享母体热内存** | memfd + MAP_SHARED（非 fork-CoW，Go 里更安全且只读永不复制） | ✅ 已实现 |
 | 写 state.json 收养 | — | 🔜 后续 |
 | worker 日志 /worker-logs/ | spec 里 bind-mount（宿主直跑暂未接） | 🔜 后续 |
 | ~50ms spawn 延迟 | 待脱掉 strace 实测 | 🔜 后续 |
-| **CoW 共享母体热内存** | worker 仍 exec → 未共享 | 🔜 后续（no-exec worker） |

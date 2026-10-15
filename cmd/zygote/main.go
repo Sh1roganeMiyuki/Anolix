@@ -9,7 +9,7 @@
 // 用法：
 //
 //	sudo ./zygote --socket /tmp/anolix-zygote.sock
-//	sudo ./zygote --socket /tmp/anolix-zygote.sock --warm 256  # 预热 256MB 模拟重型加载
+//	sudo ./zygote --socket /tmp/anolix-zygote.sock --warm 64  # 64MB 共享 memfd，worker mmap 共享
 //
 // 设计对照（bytedanceDoc 方案 B）：
 //   - 文档：母体容器 rl-mother-v3，Python zygote_mother_v3.py，AF_UNIX /run/spawn.sock，
@@ -31,30 +31,26 @@ import (
 
 func main() {
 	socketPath := flag.String("socket", "/tmp/anolix-zygote.sock", "AF_UNIX socket 监听路径")
-	warmMB := flag.Int("warm", 0, "预热内存量（MB）：分配并 touch，模拟重型初始化")
+	warmMB := flag.Int("warm", 0, "预热内存量（MB）：创建共享 memfd，worker 将 mmap 共享同一份物理页")
 	flag.Parse()
 
 	log.SetPrefix("zygote-mother: ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	// --- 预热（模拟母体的"重型初始化"） ---
-	// bytedanceDoc 中母体已 import torch + 建好模型（RSS ≈ 660MB）。
-	// 这里用显式内存分配模拟：分配 + touch → 物理页落地。
-	// ⚠️ 注意：当前 worker 走 clone+exec（exec 新程序），会换掉自己的地址空间，
-	// 所以这块预热内存【暂时不会】被 worker 共享——CoW 共享需要 worker fork 后
-	// 不 exec（原地继续跑），那是后续迭代（见 docs/zygote-design.md 第七章）。
-	// 现在保留它只是为了把"母体该预热"这件事在代码里立起来。
-	var warmMem []byte
+	// --- 预热：创建共享 memfd（模拟母体已加载的重型状态） ---
+	// bytedanceDoc 中母体已 import torch + 建好模型（RSS ≈ 660MB），worker fork 后
+	// 通过 CoW 共享这些页。Go 里 fork-continue 不安全，改用 memfd + MAP_SHARED：
+	// 母体把"热数据"写进一个 memfd，worker 通过 ExtraFiles 拿到 fd 后 mmap 共享同一份物理页。
+	// 只读热状态永不复制，比 fork-CoW 更优（见 zygote/warm.go）。
+	var warmFile *os.File
 	if *warmMB > 0 {
-		warmMem = make([]byte, *warmMB*1024*1024)
-		for i := range warmMem {
-			if i%4096 == 0 {
-				warmMem[i] = byte(i)
-			}
+		wf, werr := zygote.CreateWarmMemfd(*warmMB * 1024 * 1024)
+		if werr != nil {
+			log.Fatalf("创建 warm memfd 失败: %v", werr)
 		}
-		log.Printf("预热完成: %d MB 内存已 touch", *warmMB)
+		warmFile = wf
+		log.Printf("预热完成: %d MB 共享 memfd 已就绪（worker 将 mmap 共享）", *warmMB)
 	}
-	_ = warmMem
 
 	// --- 清理残留 socket ---
 	os.Remove(*socketPath)
@@ -87,12 +83,12 @@ func main() {
 		if err != nil {
 			return
 		}
-		go handleSpawn(conn)
+		go handleSpawn(conn, warmFile)
 	}
 }
 
 // handleSpawn 处理一次 spawn 请求。
-func handleSpawn(conn net.Conn) {
+func handleSpawn(conn net.Conn, warmFile *os.File) {
 	defer conn.Close()
 
 	req, err := zygote.ReadRequest(conn)
@@ -107,7 +103,7 @@ func handleSpawn(conn net.Conn) {
 
 	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, req.WorkerID)
 
-	pid, err := zygote.SpawnWorker(req)
+	pid, err := zygote.SpawnWorker(req, warmFile)
 	if err != nil {
 		log.Printf("spawn 失败: %v", err)
 		zygote.WriteResponse(conn, &zygote.SpawnResponse{

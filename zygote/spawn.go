@@ -26,6 +26,7 @@ package zygote
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -44,13 +45,17 @@ const NamespaceFlags = syscall.CLONE_NEWNS |
 //
 // 流程（一步到位，无中间进程）：
 //  1. exec.Command + SysProcAttr{Cloneflags: 6ns} 构造命令
-//  2. cmd.Start() → 内核 clone(2) 带 flags → worker 直接出生在新 namespace、是 pid 1
-//  3. cmd.Process.Pid = worker 的宿主 PID（因为母体不在 PID ns 中）
-//  4. 后台 goroutine Wait 回收，避免 worker 退出后变僵尸
+//  2. 若 warmFile 非空，通过 ExtraFiles 传给 worker（worker 侧看到 fd 3）
+//  3. cmd.Start() → 内核 clone(2) 带 flags → worker 直接出生在新 namespace、是 pid 1
+//  4. cmd.Process.Pid = worker 的宿主 PID（因为母体不在 PID ns 中）
+//  5. 后台 goroutine Wait 回收，避免 worker 退出后变僵尸
+//
+// warmFile：母体的预热 memfd（见 warm.go）。传给它 → worker 能 mmap 共享同一份热数据；
+// 传 nil → worker 不继承共享区（退化为普通 spawn）。
 //
 // 返回的 pid 就是 client 要的"宿主 PID"——可直接用于 kill / 读 /proc/<pid>/status。
 // worker 内部 getpid() 返回 1；/proc/<hostpid>/status 的 NSpid 有两个字段（宿主 PID + ns 内 PID）。
-func SpawnWorker(req *SpawnRequest) (int, error) {
+func SpawnWorker(req *SpawnRequest, warmFile *os.File) (int, error) {
 	if req == nil || req.Binary == "" {
 		return 0, fmt.Errorf("请求缺少 binary")
 	}
@@ -64,14 +69,24 @@ func SpawnWorker(req *SpawnRequest) (int, error) {
 		Setsid: true,
 	}
 
+	// 把预热 memfd 传给 worker：ExtraFiles[0] → worker 侧的 fd 3（见 warm.go 约定）。
+	// fd 会跨 clone+exec 继承，memfd 不依赖挂载 ns，新 mount ns 里照样能 mmap。
+	if warmFile != nil {
+		cmd.ExtraFiles = []*os.File{warmFile}
+	}
+
 	if len(req.Env) > 0 {
 		cmd.Env = req.Env
 	}
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
-	// worker 的 stdout/stderr 默认继承母体；如需落盘，后续可在此接文件
-	//（或走母体 spec 里 bind-mount 的 /worker-logs）。
+	// worker 的 stdout/stderr 接到母体的 stdout/stderr（= 母体所在终端）。
+	// ⚠️ 必须显式设置：os/exec 里 Stdout 为 nil 时会被接到 /dev/null，
+	// 不设则 worker 的打印（共享证据、校验结果）全部丢失。
+	// 后续可改成写 per-worker 日志文件（见 spec 里 bind-mount 的 /worker-logs）。
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("clone worker 失败: %w", err)
