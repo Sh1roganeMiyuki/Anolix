@@ -4,7 +4,9 @@
 //   - 依赖母体通过 ExtraFiles 传进来的 warm memfd（固定在 fd 3）
 //   - 依赖母体 clone 时给的 6 间房（PID ns 里它是 1 号）
 //
-// 职责：映射母体的共享热数据 → 校验 → 打印"物理页真共享"的证据。
+// 职责：① 自己装 seccomp 白名单（#19：最终程序自己装）→ ② 映射母体共享热数据 →
+//
+//	③ 校验 → ④ 打印"物理页真共享"的证据。
 //
 // 用法（由母体 spawn，不手动跑）：
 //
@@ -13,6 +15,7 @@
 package main
 
 import (
+	"anolix/config"
 	"anolix/zygote"
 	"fmt"
 	"os"
@@ -24,6 +27,24 @@ import (
 )
 
 func main() {
+	// --- 第一步：装 seccomp（worker 自己装；#19 坑1：母体代装会自缚）---
+	// seccomp 不可撤销 → 必须"最终程序自己装、紧贴干活之前"。这里 worker 一启动就先装。
+	// 白名单复用 config.DefaultAllowedSyscalls（Anolix 沙箱那份 battle-tested 名单）。
+	if !hasArg("noseccomp") {
+		n, unknown, err := zygote.InstallSeccomp(config.DefaultAllowedSyscalls, uint32(config.DefaultErrnoRet))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "worker: 装 seccomp 失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("seccomp 已装:  放行 %d 条 syscall，默认动作=ERRNO(%d=EPERM)\n", n, config.DefaultErrnoRet)
+		if len(unknown) > 0 {
+			fmt.Printf("  ⚠️ 名单里 %d 条没认出来（拼错=没写，#19 坑2）: %v\n", len(unknown), unknown)
+		}
+		probeBlocked()
+	} else {
+		fmt.Println("seccomp:      已跳过（noseccomp）—— 对照组")
+	}
+
 	// --- 映射母体的共享热数据（fd 3 = ExtraFiles[0]） ---
 	// MAP_SHARED + 同一个 memfd → 与母体、与其他 worker 共享同一批物理页。
 	region, err := zygote.MapWarm(zygote.WarmFD)
@@ -96,4 +117,31 @@ func hostname() string {
 		return "?"
 	}
 	return h
+}
+
+// hasArg 判断 os.Args 里是否含某个标记（如 "noseccomp"）。
+func hasArg(flag string) bool {
+	for _, a := range os.Args[1:] {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// probeBlocked 调一个"不在白名单"的 syscall（sethostname=170），证明过滤器真生效。
+// worker 是 root、在自己的 UTS ns 里 → 若没被 seccomp 拦，sethostname 会成功；
+// 被拦则返回我们配的 errno（EPERM）。所以"成功=没拦住，EPERM=拦住了"。
+func probeBlocked() {
+	name := []byte("blocked")
+	_, _, errno := syscall.Syscall(syscall.SYS_SETHOSTNAME,
+		uintptr(unsafe.Pointer(&name[0])), uintptr(len(name)), 0)
+	switch errno {
+	case 0:
+		fmt.Println("seccomp 探针:  sethostname → 成功   ❌ 没拦住（过滤器没生效？）")
+	case syscall.EPERM:
+		fmt.Println("seccomp 探针:  sethostname → EPERM  ✅ 被盖章（不在白名单）")
+	default:
+		fmt.Printf("seccomp 探针:  sethostname → errno=%d (%s)\n", errno, errno)
+	}
 }
