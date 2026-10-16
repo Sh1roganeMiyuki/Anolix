@@ -19,6 +19,7 @@ import (
 	"anolix/zygote"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -43,6 +44,15 @@ func main() {
 		probeBlocked()
 	} else {
 		fmt.Println("seccomp:      已跳过（noseccomp）—— 对照组")
+	}
+
+	// --- 攻击模式：触发 cgroup/seccomp 的"执法"，验证限额真生效 ---
+	// 用法：./bin/worker [noseccomp] attack-oom [MB] | attack-pids | attack-syscall
+	for i, a := range os.Args[1:] {
+		if strings.HasPrefix(a, "attack-") {
+			runAttack(os.Args[1+i:])
+			return
+		}
 	}
 
 	// --- 映射母体的共享热数据（fd 3 = ExtraFiles[0]） ---
@@ -143,5 +153,77 @@ func probeBlocked() {
 		fmt.Println("seccomp 探针:  sethostname → EPERM  ✅ 被盖章（不在白名单）")
 	default:
 		fmt.Printf("seccomp 探针:  sethostname → errno=%d (%s)\n", errno, errno)
+	}
+}
+
+// runAttack 分派攻击模式（触发 cgroup/seccomp 的"执法"）。
+func runAttack(args []string) {
+	switch args[0] {
+	case "attack-oom":
+		mb := 512
+		if len(args) > 1 {
+			if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
+				mb = v
+			}
+		}
+		attackOOM(mb)
+	case "attack-pids":
+		attackPids()
+	case "attack-syscall":
+		attackSyscall()
+	default:
+		fmt.Printf("未知攻击模式: %s（可用: attack-oom [MB] / attack-pids / attack-syscall）\n", args[0])
+	}
+}
+
+// attackOOM 申请并逐页 touch 大量内存；超过 cgroup memory.max 应被 OOM 杀（退出码 137）。
+func attackOOM(mb int) {
+	fmt.Printf("[attack-oom] 申请 + 逐页 touch %d MB（超过 memory.max 应被 OOM 杀）\n", mb)
+	buf := make([]byte, mb*1024*1024)
+	for i := range buf {
+		buf[i] = byte(i) // 每页第一次写 → 缺页 → charge cgroup
+	}
+	fmt.Printf("[attack-oom] 居然没死？touch 完了 %d MB —— memory.max 没生效？\n", mb)
+}
+
+// attackPids 狂 fork 子进程（让它们睡着占坑），直到 pids.max 拦住 → 期望 EAGAIN。
+func attackPids() {
+	fmt.Println("[attack-pids] 狂 fork 子进程，直到 pids.max 拦住（期望 EAGAIN）")
+	var cmds []*exec.Cmd
+	defer func() {
+		for _, c := range cmds {
+			_ = c.Process.Kill()
+		}
+	}()
+	for i := 0; i < 100000; i++ {
+		c := exec.Command("/bin/sleep", "60")
+		if err := c.Start(); err != nil {
+			fmt.Printf("[attack-pids] 第 %d 个 fork 失败: %v（期望 EAGAIN = pids.max 生效）\n", i, err)
+			return
+		}
+		cmds = append(cmds, c)
+	}
+	fmt.Println("[attack-pids] fork 了 10 万个还没被拦？pids.max 没生效？")
+}
+
+// attackSyscall 调几个"不在白名单"的危险 syscall，看 seccomp 拦不拦（期望全 EPERM）。
+func attackSyscall() {
+	fmt.Println("[attack-syscall] 调不在白名单的危险 syscall（期望全 EPERM = 被盖章）")
+	probes := []struct {
+		name string
+		nr   uintptr
+	}{
+		{"sethostname", 170},
+		{"bpf", 321},
+		{"keyctl", 250},
+	}
+	arg := []byte("x")
+	for _, p := range probes {
+		_, _, errno := syscall.Syscall(p.nr, uintptr(unsafe.Pointer(&arg[0])), 1, 0)
+		tag := "✅ 被盖章"
+		if errno != syscall.EPERM {
+			tag = "❌ 不是 EPERM（没拦住 / 或 errno 不同）"
+		}
+		fmt.Printf("  %-12s(nr=%d) → errno=%d (%s)  %s\n", p.name, p.nr, errno, errno, tag)
 	}
 }

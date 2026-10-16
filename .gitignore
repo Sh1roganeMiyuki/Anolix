@@ -37,3 +37,7 @@ __pycache__/
 
 # 构建产物
 /bin/
+
+# Go 临时缓存（沙箱只读 /tmp 时用）
+/.gotmp/
+/.gocache/

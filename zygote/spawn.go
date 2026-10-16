@@ -26,6 +26,7 @@ package zygote
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"syscall"
@@ -112,7 +113,10 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 	// 母体常驻，必须自己 Wait，否则 worker 退出后留僵尸；
 	// Wait 返回后顺手销毁叶子 cgroup（worker 已死 → 叶子空 → rmdir 成功）。
 	go func() {
-		_ = cmd.Wait()
+		if werr := cmd.Wait(); werr != nil {
+			// 记录退出状态：攻击测试靠它看 OOM（signal: killed）/ 信号 / 非零码
+			log.Printf("worker %d 退出异常: %v", hostPID, werr)
+		}
 		cg.Destroy()
 	}()
 
