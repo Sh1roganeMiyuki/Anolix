@@ -43,9 +43,13 @@ const cgroupRoot = "/sys/fs/cgroup"
 //     超了被 throttle 暂停（#9：时间资源不可回收也不能报错，只能暂停）。
 type CgroupLimits struct {
 	MemoryMaxBytes int64 `json:"memory_max_bytes,omitempty"`
-	PidsMax        int64 `json:"pids_max,omitempty"`
-	CPUQuotaUS     int64 `json:"cpu_quota_us,omitempty"`
-	CPUPeriodUS    int64 `json:"cpu_period_us,omitempty"`
+	// SwapMaxBytes → memory.swap.max（字节）。0 = 不许换出。
+	// ⚠️ 关键坑：若系统有 swap 且这里不限，memory.max 会被"换出"绕过——
+	// 只限常驻内存、超出部分换到 swap，**不会 OOM**。默认 0 = 真硬上限。
+	SwapMaxBytes int64 `json:"swap_max_bytes,omitempty"`
+	PidsMax      int64 `json:"pids_max,omitempty"`
+	CPUQuotaUS   int64 `json:"cpu_quota_us,omitempty"`
+	CPUPeriodUS  int64 `json:"cpu_period_us,omitempty"`
 }
 
 // WorkerCgroup 是一个 worker 专属的叶子 cgroup（建好、写好限额、目录 fd 已打开）。
@@ -88,6 +92,9 @@ func CreateWorkerCgroup(id string, lim CgroupLimits) (*WorkerCgroup, error) {
 		if err := writeLim("memory.max", strconv.FormatInt(lim.MemoryMaxBytes, 10)); err != nil {
 			return rollback(err)
 		}
+		// 顺手把 swap 也封上：否则 memory.max 会被"换出"绕过（只限常驻、不 OOM）。
+		// best-effort：无 swap 记账的系统写失败就算了。
+		_ = writeLim("memory.swap.max", strconv.FormatInt(lim.SwapMaxBytes, 10))
 	}
 	if lim.PidsMax > 0 {
 		if err := writeLim("pids.max", strconv.FormatInt(lim.PidsMax, 10)); err != nil {

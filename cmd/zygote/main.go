@@ -34,6 +34,7 @@ func main() {
 	warmMB := flag.Int("warm", 0, "预热内存量（MB）：创建共享 memfd，worker 将 mmap 共享同一份物理页")
 	cgEnable := flag.Bool("cgroup", false, "给每个 worker 建专属叶子 cgroup（资源围栏）")
 	cgMemMB := flag.Int("cg-memory", 0, "worker 内存上限（MB），0=不限；需配合 --cgroup")
+	cgSwapMB := flag.Int("cg-swap", 0, "worker 可换出到 swap 的上限（MB），0=不许换出（memory.max 才是硬上限）")
 	cgPids := flag.Int("cg-pids", 0, "worker 进程/线程数上限，0=不限；需配合 --cgroup")
 	cgCPUPct := flag.Int("cg-cpu-pct", 0, "worker CPU 配额百分比（50=半核，200=两核），0=不限；需配合 --cgroup")
 	flag.Parse()
@@ -43,6 +44,7 @@ func main() {
 	if *cgMemMB > 0 {
 		defLim.MemoryMaxBytes = int64(*cgMemMB) * 1024 * 1024
 	}
+	defLim.SwapMaxBytes = int64(*cgSwapMB) * 1024 * 1024 // 默认 0 → 不许换出
 	if *cgPids > 0 {
 		defLim.PidsMax = int64(*cgPids)
 	}
