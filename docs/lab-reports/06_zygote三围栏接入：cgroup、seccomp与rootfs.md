@@ -192,7 +192,7 @@ tmp
 | 1 | **seccomp 名单收最小** | strace 抓唯一缺失 syscall，把 153 收回 ~114 | 待执行 |
 | 2 | **薄 init 收编 worker** | 让 `worker-init` 统一做 rootfs+seccomp，`worker` 只管负载（去掉双装判定） | 待执行 |
 | 3 | **state.json 收养** | 让 runc `list/kill/delete` 管得到 worker | 待执行 |
-| 4 | 延迟稳态数 | 脱 strace 跑 ≥50 次取 p50/p95（带基准对照） | 待执行 |
+| 4 | **延迟稳态数** | 脱 strace 取 p50/p95（带基准对照） | ✅ 已完成（见 07 篇） |
 | 5 | 母体进 runc 容器 | 用 `zygote/spec.go` 对齐"母体是容器"的形态 | 装置已写，待跑 |
 
 ---

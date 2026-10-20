@@ -248,6 +248,22 @@ func defaultResources() *specs.LinuxResources {
 	}
 }
 
+// minimalMounts 是 defaultMounts 的“最小子集”：只留 /proc 与 /dev。
+//
+// 用途：A/B 对比时把 runc 侧削到与 zygote 路径同一个功能范围——
+// worker-init 也只挂这两样。少掉的 /dev/pts、/dev/shm、/dev/mqueue、/sys
+// 以及全部掩蔽/只读重挂，都属于加固而非隔离必需；要比机制效率就先对齐它们。
+func minimalMounts(rootless bool) []specs.Mount {
+	var out []specs.Mount
+	for _, m := range defaultMounts(rootless) {
+		switch m.Destination {
+		case "/proc", "/dev":
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // --- 【可略读】掩蔽/只读清单：知道类别（内核内部信息、可调参数）即可，不必背具体路径。
 // defaultMaskedPaths 返回"掩蔽路径"：这些文件在容器里被 /dev/null 盖住，读出来是空的。
 // 例：/proc/kcore 是内核内存镜像，/proc/keys 是内核密钥环——都不该给容器看见。

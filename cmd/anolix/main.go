@@ -61,6 +61,7 @@ func run() int {
 	timeout := fs.Duration("timeout", 0, "容器运行超时（如 30s）；0 表示不限")
 	keepBundle := fs.Bool("keep-bundle", false, "退出后保留 bundle 目录（调试用）")
 	timing := fs.Bool("timing", false, "打印各阶段耗时（测启动开销用）")
+	minimalRootfs := fs.Bool("minimal-rootfs", false, "只挂 /proc 与 /dev，不掩蔽/不重挂（A/B 对比用）")
 
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
@@ -85,10 +86,13 @@ func run() int {
 		policy = p
 	}
 
-	// --timing 的"起点锚"：读一次系统开机秒数（/proc/uptime 格式：秒.百分秒）。
-	// 容器里执行 `cat /proc/uptime` 可拿到同一时钟的读数，相减 = 真·冷启动时间；
-	// 即使套着 strace（它只拖慢进程、不动时钟）也对得上。
+	// --timing 的两个起点锚：
+	//   t0ns   = CLOCK_MONOTONIC 纳秒，跨进程可比——写进容器 env，供 payload（如 /tprobe）
+	//            自报“从本进程入口到 payload 第一条指令”的耗时；
+	//   uptime = /proc/uptime，人类可读，用于与容器内读数对账。
+	var t0ns int64
 	if *timing {
+		t0ns = launcher.MonotonicNS()
 		if up, err := os.ReadFile("/proc/uptime"); err == nil {
 			if fields := strings.Fields(string(up)); len(fields) > 0 {
 				fmt.Fprintf(os.Stderr, "anolix: [timing] 起点 uptime=%s（可与容器内 /proc/uptime 对账）\n", fields[0])
@@ -98,16 +102,18 @@ func run() int {
 
 	// 第 5 步：把参数打包交给 launcher——校验、找 runc、生成容器 ID 都在里面做。
 	l, err := launcher.New(launcher.Options{
-		ContainerID: *id,
-		Rootfs:      *rootfs,
-		BundleDir:   *bundleDir,
-		StateDir:    *stateDir,
-		RuncPath:    *runcPath,
-		Policy:      policy,
-		Command:     command,
-		Timeout:     *timeout,
-		KeepBundle:  *keepBundle,
-		Timing:      *timing,
+		ContainerID:   *id,
+		Rootfs:        *rootfs,
+		BundleDir:     *bundleDir,
+		StateDir:      *stateDir,
+		RuncPath:      *runcPath,
+		Policy:        policy,
+		Command:       command,
+		Timeout:       *timeout,
+		KeepBundle:    *keepBundle,
+		Timing:        *timing,
+		T0NS:          t0ns,
+		MinimalRootfs: *minimalRootfs,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "anolix: %v\n", err)

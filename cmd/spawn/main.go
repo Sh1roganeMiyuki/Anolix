@@ -37,6 +37,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	// 端到端计时的起点：与 anolix 的 --timing 同口径，都在“参数解析完成”之后取。
+	// 从这里到 payload 第一条指令之间的一切（socket 往返、母体排队、clone、
+	// execve、rootfs 装修、seccomp 编译）都算进启动延迟。
+	t0ns := zygote.MonotonicNS()
+
 	// 自动生成 worker ID
 	id := *workerID
 	if id == "" {
@@ -58,6 +63,7 @@ func main() {
 		Binary:   args[0],
 		Args:     args[1:],
 		WorkerID: id,
+		T0NS:     t0ns,
 	}
 
 	t0 := time.Now()

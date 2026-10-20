@@ -1,0 +1,160 @@
+{
+  "ociVersion": "1.2.1",
+  "process": {
+    "user": {
+      "uid": 0,
+      "gid": 0
+    },
+    "args": [
+      "/tprobe"
+    ],
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "TERM=xterm",
+      "HOSTNAME=anolix"
+    ],
+    "cwd": "/",
+    "capabilities": {},
+    "rlimits": [
+      {
+        "type": "RLIMIT_NOFILE",
+        "hard": 1024,
+        "soft": 1024
+      }
+    ],
+    "noNewPrivileges": true
+  },
+  "root": {
+    "path": "/home/sh1rogane/Anolix/rootfs"
+  },
+  "hostname": "anolix",
+  "mounts": [
+    {
+      "destination": "/proc",
+      "type": "proc",
+      "source": "proc",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    },
+    {
+      "destination": "/dev",
+      "type": "tmpfs",
+      "source": "tmpfs",
+      "options": [
+        "nosuid",
+        "strictatime",
+        "mode=755",
+        "size=65536k"
+      ]
+    }
+  ],
+  "linux": {
+    "uidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 1000,
+        "size": 1
+      }
+    ],
+    "gidMappings": [
+      {
+        "containerID": 0,
+        "hostID": 1000,
+        "size": 1
+      }
+    ],
+    "resources": {
+      "devices": [
+        {
+          "allow": false,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 3,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 5,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 7,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 8,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 1,
+          "minor": 9,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 5,
+          "minor": 0,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 5,
+          "minor": 2,
+          "access": "rwm"
+        },
+        {
+          "allow": true,
+          "type": "c",
+          "major": 136,
+          "minor": -1,
+          "access": "rwm"
+        }
+      ]
+    },
+    "namespaces": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "pid"
+      },
+      {
+        "type": "network"
+      },
+      {
+        "type": "ipc"
+      },
+      {
+        "type": "uts"
+      },
+      {
+        "type": "mount"
+      },
+      {
+        "type": "cgroup"
+      },
+      {
+        "type": "time"
+      }
+    ]
+  }
+}

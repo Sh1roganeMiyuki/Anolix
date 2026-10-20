@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 // killWaitDelay 是"取消后等对方优雅退出的最长时间"。
@@ -68,6 +69,28 @@ type Options struct {
 	KeepBundle bool
 	// Timing 为 true 时向 Stderr 打印启动各阶段耗时（启动开销实验用；默认关闭）。
 	Timing bool
+	// T0NS 是 --timing 的起点（CLOCK_MONOTONIC 纳秒，由调用方在参数解析后取）。
+	// 非 0 时注入容器环境变量 ANOLIX_T0_NS，供 payload 自报“启动到第一条指令”的耗时。
+	T0NS int64
+	// MinimalRootfs 为 true 时把容器功能范围削到与 zygote 路径一致：
+	// 只挂 /proc 与 /dev，不掩蔽、不重挂只读。
+	// 用途是 A/B 对比时对齐功能范围——比的是机制效率，不是“谁做的事多”。
+	MinimalRootfs bool
+}
+
+// MonotonicNS 返回 CLOCK_MONOTONIC 纳秒。
+//
+// 跨进程可比，用于让 payload 和父进程读同一根时间轴。
+// 放在 launcher 而不是 import zygote：anolix 的 runc 路径不该依赖 zygote 包。
+// （zygote/timing.go 里有同源实现，两边读的是同一个系统时钟。）
+func MonotonicNS() int64 {
+	var ts syscall.Timespec
+	_, _, e := syscall.RawSyscall(syscall.SYS_CLOCK_GETTIME,
+		1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&ts)), 0)
+	if e != 0 {
+		return 0
+	}
+	return ts.Nano()
 }
 
 // Launcher 是一次容器运行的执行器（把一次运行所需的全部信息装在一起）。
@@ -330,7 +353,21 @@ func (l *Launcher) prepareBundle() error {
 	}
 
 	// 把 policy + 命令 + rootfs 翻译成说明书结构体，再序列化成 JSON。
-	spec := buildSpec(l.policy, l.opts.Command, l.opts.Env, l.rootfs, l.rootless)
+	// 计时：把起点带进容器，供 payload（如 /tprobe）自报“从父进程入口到第一条指令”的耗时。
+	// 复制一份 env 再 append，不要改到调用方传进来的切片。
+	env := l.opts.Env
+	if l.opts.T0NS != 0 {
+		env = append(append([]string{}, env...), fmt.Sprintf("ANOLIX_T0_NS=%d", l.opts.T0NS))
+	}
+	spec := buildSpec(l.policy, l.opts.Command, env, l.rootfs, l.rootless)
+	// --minimal-rootfs：把 runc 侧的功能范围削到与 zygote 一致。
+	// 默认 spec 带 11 条掩蔽 + 6 条只读重挂 + 6 项基础挂载；这里只留 /proc 与 /dev。
+	// ⚠️ 削完之后跑的不是“默认 runc”，结论里必须标清楚是哪一种。
+	if l.opts.MinimalRootfs && spec.Linux != nil {
+		spec.Linux.MaskedPaths = nil
+		spec.Linux.ReadonlyPaths = nil
+		spec.Mounts = minimalMounts(l.rootless)
+	}
 	data, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化 OCI spec 失败: %w", err)

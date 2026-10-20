@@ -52,6 +52,10 @@ type SpawnRequest struct {
 	// Limits 可选：本 worker 的资源围栏覆盖（nil = 用母体启动时的默认值）。
 	// 让不同 worker 能有不同的 cgroup 限额（见 cgroup.go）。
 	Limits *CgroupLimits `json:"limits,omitempty"`
+	// T0NS 是客户端发请求前取的 CLOCK_MONOTONIC 纳秒，用于端到端计时。
+	// 为 0 时由母体在 clone 前自己取——那样不含 socket 往返与排队，
+	// 测“用户感知的启动延迟”时必须由客户端填。
+	T0NS int64 `json:"t0_ns,omitempty"`
 }
 
 // SpawnResponse 是 mother → client 的 spawn 响应。

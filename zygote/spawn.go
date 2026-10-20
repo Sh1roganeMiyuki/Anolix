@@ -91,15 +91,19 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 	if len(req.Env) > 0 {
 		cmd.Env = req.Env
 	}
-	// 计时起点：clone 之前取一次 CLOCK_MONOTONIC，经 env 注入给 worker-init。
-	// 于是“clone + execve + worker-init 的 Go 冷启动”全算进第一段，
-	// 与 runc 那条链的“execve runc → unshare”可对齐比较。
+	// 计时起点：优先用客户端发请求前取的时刻（含 socket 往返与母体排队），
+	// 让 zygote 侧的“启动延迟”与 anolix 的“程序入口→payload”同口径；
+	// 客户端没给（T0NS=0）时就在 clone 前自己取。
 	// env 复制一份：append 可能复用底层数组，不能改到调用方传进来的切片。
 	baseEnv := cmd.Env
 	if baseEnv == nil {
 		baseEnv = os.Environ()
 	}
-	cmd.Env = append(append([]string{}, baseEnv...), TimingEnvs(MonotonicNS(), req.WorkerID)...)
+	t0 := req.T0NS
+	if t0 == 0 {
+		t0 = MonotonicNS()
+	}
+	cmd.Env = append(append([]string{}, baseEnv...), TimingEnvs(t0, req.WorkerID)...)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
