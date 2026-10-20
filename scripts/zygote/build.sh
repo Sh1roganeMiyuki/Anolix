@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.local/sdk/go/bin:$PATH"
-go build -o bin/zygote ./cmd/zygote
-go build -o bin/spawn  ./cmd/spawn
-go build -o bin/worker ./cmd/worker
-echo "OK: bin/{zygote,spawn,worker}"
+go build -o bin/zygote      ./cmd/zygote
+go build -o bin/spawn       ./cmd/spawn
+go build -o bin/worker      ./cmd/worker
+go build -o bin/worker-init ./cmd/worker-init
+echo "OK: bin/{zygote,spawn,worker,worker-init}"

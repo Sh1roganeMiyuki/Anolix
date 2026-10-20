@@ -31,8 +31,10 @@ func main() {
 	// --- 第一步：装 seccomp（worker 自己装；#19 坑1：母体代装会自缚）---
 	// seccomp 不可撤销 → 必须"最终程序自己装、紧贴干活之前"。这里 worker 一启动就先装。
 	// 白名单复用 config.DefaultAllowedSyscalls（Anolix 沙箱那份 battle-tested 名单）。
-	if !hasArg("noseccomp") {
-		n, unknown, err := zygote.InstallSeccomp(config.DefaultAllowedSyscalls, uint32(config.DefaultErrnoRet))
+	if os.Getenv("ANOLIX_INIT_SECCOMP") == "1" {
+		fmt.Println("seccomp:      已由 worker-init 装好，跳过自装")
+	} else if !hasArg("noseccomp") {
+		n, unknown, err := zygote.InstallSeccomp(zygote.DefaultPayloadAllowlist(), uint32(config.DefaultErrnoRet))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "worker: 装 seccomp 失败: %v\n", err)
 			os.Exit(1)

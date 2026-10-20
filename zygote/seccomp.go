@@ -16,6 +16,7 @@
 package zygote
 
 import (
+	"anolix/config"
 	"fmt"
 	"syscall"
 	"unsafe"
@@ -93,6 +94,51 @@ var x86_64SyscallNumbers = map[string]uint32{
 	"preadv": 295, "pwritev": 296, "prlimit64": 302, "renameat2": 316,
 	"getrandom": 318, "execveat": 322, "statx": 332, "rseq": 334,
 	"clone3": 435, "close_range": 436, "openat2": 437, "faccessat2": 439,
+	// —— 补充：常见工具（busybox 等）可能会用的（见 CommonPayloadSyscalls）——
+	"select": 23, "getdents": 78, "fdatasync": 75,
+	"readahead": 187, "getxattr": 191, "lgetxattr": 192, "fgetxattr": 193,
+	"listxattr": 194, "llistxattr": 195, "flistxattr": 196, "fadvise64": 221,
+	"get_robust_list": 274, "utime": 132, "utimes": 235, "getsid": 124,
+	"getpgid": 121, "setpgid": 109, "sched_getparam": 143,
+	"sched_getscheduler": 145, "sched_get_priority_max": 146,
+	"sched_get_priority_min": 147, "sched_rr_get_interval": 148,
+	"getpriority": 140, "sysinfo": 99, "sendfile": 40, "fallocate": 285,
+	"membarrier": 324, "mincore": 27, "mlock": 149, "munlock": 150,
+	"mlockall": 151, "munlockall": 152, "timerfd_create": 283,
+	"timerfd_settime": 286, "timerfd_gettime": 287, "eventfd": 284,
+	"signalfd4": 289, "pselect6": 270,
+}
+
+// CommonPayloadSyscalls 是"常见工具（busybox 等）可能会用、但未必在 config 名单里"的补充白名单。
+//
+// ⚠️ 这是务实做法（先把常见工具跑通）；严谨做法是 strace 抓出**唯一那条**再精确补（#26 坑1）。
+// 都是非特权的"读信息 / 常规文件"类调用，不含 mount/ptrace/bpf 等危险项。
+var CommonPayloadSyscalls = []string{
+	"stat", "lstat", "getdents", "select", "pselect6", "fdatasync",
+	"readahead", "getxattr", "lgetxattr", "fgetxattr", "listxattr",
+	"llistxattr", "flistxattr", "fadvise64", "get_robust_list", "utime",
+	"utimes", "getsid", "getpgid", "setpgid", "sched_getparam",
+	"sched_getscheduler", "sched_get_priority_max", "sched_get_priority_min",
+	"sched_rr_get_interval", "getpriority", "sysinfo", "sendfile",
+	"fallocate", "membarrier", "mincore", "mlock", "munlock", "mlockall",
+	"munlockall", "timerfd_create", "timerfd_settime", "timerfd_gettime",
+	"eventfd", "signalfd4",
+}
+
+// DefaultPayloadAllowlist 返回 config 默认名单 + 常见工具补充名单 的合并（去重）。
+func DefaultPayloadAllowlist() []string {
+	merged := append([]string(nil), config.DefaultAllowedSyscalls...)
+	seen := make(map[string]bool, len(merged))
+	for _, n := range merged {
+		seen[n] = true
+	}
+	for _, n := range CommonPayloadSyscalls {
+		if !seen[n] {
+			seen[n] = true
+			merged = append(merged, n)
+		}
+	}
+	return merged
 }
 
 // SyscallNumber 把一个 syscall 名字翻译成 x86-64 号码。
