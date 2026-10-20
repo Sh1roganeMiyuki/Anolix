@@ -29,6 +29,10 @@ import (
 )
 
 func main() {
+	// 计时第一站：到这里说明 clone + execve + Go runtime 启动已经走完。
+	// 后续每站的 ns 值都是相对母体 clone 前那一刻的 CLOCK_MONOTONIC。
+	zygote.Mark("init_start")
+
 	rootfs, payload, extra := parseArgs(os.Args[1:])
 	if rootfs == "" || payload == "" {
 		fmt.Fprintln(os.Stderr, "用法: worker-init --rootfs <dir> -- <payload> [args...]")
@@ -55,11 +59,13 @@ func main() {
 		os.Exit(2)
 	}
 	fmt.Printf("worker-init: pivot_root 完成；seccomp 放行 %d 条 syscall\n", n)
+	zygote.Mark("seccomp")
 	if len(unknown) > 0 {
 		fmt.Printf("worker-init: ⚠️ 名单里 %d 条没认出来（拼错=没写）: %v\n", len(unknown), unknown)
 	}
 
 	// 3) execve payload。带个 env 告诉 payload：seccomp 已由 init 装好（别再装一遍）。
+	zygote.Mark("execve")
 	env := append(os.Environ(), "ANOLIX_INIT_SECCOMP=1")
 	if err := syscall.Exec(payload, append([]string{payload}, extra...), env); err != nil {
 		fmt.Fprintf(os.Stderr, "worker-init: execve %s 失败: %v\n", payload, err)
@@ -103,11 +109,13 @@ func setupRootfs(rootfs string) error {
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("MS_PRIVATE(/) 失败: %w", err)
 	}
+	zygote.Mark("ms_private")
 
 	// ② rootfs bind 到自身 → 变成挂载点（pivot_root 前提）。
 	if err := syscall.Mount(rootfs, rootfs, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("bind %s 失败: %w", rootfs, err)
 	}
+	zygote.Mark("bind_rootfs")
 
 	// ③ 准备 put_old（旧根的落脚处，必须在新根下面）。
 	oldRoot := filepath.Join(rootfs, ".oldroot")
@@ -119,6 +127,7 @@ func setupRootfs(rootfs string) error {
 	if err := syscall.PivotRoot(rootfs, oldRoot); err != nil {
 		return fmt.Errorf("pivot_root 失败: %w", err)
 	}
+	zygote.Mark("pivot_root")
 	// ⑤ 切到新根（pivot_root 后 cwd 还在旧根，必须先切）。
 	if err := os.Chdir("/"); err != nil {
 		return fmt.Errorf("chdir(/) 失败: %w", err)
@@ -127,6 +136,7 @@ func setupRootfs(rootfs string) error {
 	// ⑥ 摘掉旧根（detach 立即生效，旧根就彻底从视野消失）。
 	_ = syscall.Unmount("/.oldroot", syscall.MNT_DETACH)
 	_ = os.Remove("/.oldroot")
+	zygote.Mark("detach_oldroot")
 
 	// ⑦ 挂基础设施：/proc（必需）、/dev（tmpfs，best-effort）。
 	_ = os.MkdirAll("/proc", 0555)
@@ -137,6 +147,7 @@ func setupRootfs(rootfs string) error {
 	_ = os.MkdirAll("/dev", 0755)
 	_ = syscall.Mount("tmpfs", "/dev", "tmpfs",
 		syscall.MS_NOSUID|syscall.MS_STRICTATIME, "mode=755,size=65536k")
+	zygote.Mark("mounts")
 
 	return nil
 }

@@ -91,6 +91,15 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 	if len(req.Env) > 0 {
 		cmd.Env = req.Env
 	}
+	// 计时起点：clone 之前取一次 CLOCK_MONOTONIC，经 env 注入给 worker-init。
+	// 于是“clone + execve + worker-init 的 Go 冷启动”全算进第一段，
+	// 与 runc 那条链的“execve runc → unshare”可对齐比较。
+	// env 复制一份：append 可能复用底层数组，不能改到调用方传进来的切片。
+	baseEnv := cmd.Env
+	if baseEnv == nil {
+		baseEnv = os.Environ()
+	}
+	cmd.Env = append(append([]string{}, baseEnv...), TimingEnvs(MonotonicNS(), req.WorkerID)...)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
