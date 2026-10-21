@@ -25,6 +25,9 @@ coverage.*
 # kprof.py 测试临时目录（bundle/state/最小策略/负载文件）
 /.kprof-tmp/
 
+# 并发压测原始数据（conc.sh 生成）
+/.bench-tmp/conc/
+
 # Python 缓存
 __pycache__/
 *.pyc

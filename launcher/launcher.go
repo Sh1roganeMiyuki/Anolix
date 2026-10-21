@@ -353,11 +353,14 @@ func (l *Launcher) prepareBundle() error {
 	}
 
 	// 把 policy + 命令 + rootfs 翻译成说明书结构体，再序列化成 JSON。
-	// 计时：把起点带进容器，供 payload（如 /tprobe）自报“从父进程入口到第一条指令”的耗时。
+	// 计时：把起点带进容器，供 payload（如 /tprobe）自报“从父进程入口到第一条指令”的耗时；
+	// 同时带一个 run id，让 payload 的 PAYLOAD_META 在并发/多次运行时能对回本次容器。
 	// 复制一份 env 再 append，不要改到调用方传进来的切片。
 	env := l.opts.Env
 	if l.opts.T0NS != 0 {
-		env = append(append([]string{}, env...), fmt.Sprintf("ANOLIX_T0_NS=%d", l.opts.T0NS))
+		env = append(append([]string{}, env...),
+			fmt.Sprintf("ANOLIX_T0_NS=%d", l.opts.T0NS),
+			"ANOLIX_RUN_ID="+l.opts.ContainerID)
 	}
 	spec := buildSpec(l.policy, l.opts.Command, env, l.rootfs, l.rootless)
 	// --minimal-rootfs：把 runc 侧的功能范围削到与 zygote 一致。

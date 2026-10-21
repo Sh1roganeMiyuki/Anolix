@@ -120,27 +120,37 @@ func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.
 		return
 	}
 
-	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, req.WorkerID)
+	// 观测：接住请求的时刻。与客户端 dispatch_ns、payload 的 abs_ns 同一根
+	// CLOCK_MONOTONIC，三个点可直接相减，拆出 socket 排队 / cgroup / clone+exec。
+	acceptNS := zygote.MonotonicNS()
+
+	// worker id 先定死：cgroup 叶子名、日志、注入 worker 的 ANOLIX_RUN_ID 共用同一个。
+	// 重名会让 os.Mkdir 直接 EEXIST，所以空值时必须带 pid + 纳秒，不能只靠时间取模。
+	wid := req.WorkerID
+	if wid == "" {
+		wid = fmt.Sprintf("w-%d-%d", os.Getpid(), time.Now().UnixNano())
+		req.WorkerID = wid
+	}
+
+	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, wid)
 
 	// 资源围栏：为这个 worker 建专属叶子 cgroup。
 	// 关键：用 clone3(CLONE_INTO_CGROUP) 让 worker "出生即在册"，没有 #20 的启动空窗。
 	var cg *zygote.WorkerCgroup
+	var cgDoneNS int64 // 0 = 未启用 cgroup
 	if cgEnable {
 		lim := defLim
 		if req.Limits != nil {
 			lim = *req.Limits // 请求可覆盖母体默认
 		}
-		id := req.WorkerID
-		if id == "" {
-			id = fmt.Sprintf("w-%d", time.Now().UnixNano())
-		}
-		c, cerr := zygote.CreateWorkerCgroup(id, lim)
+		c, cerr := zygote.CreateWorkerCgroup(wid, lim)
 		if cerr != nil {
 			log.Printf("建 cgroup 失败: %v", cerr)
 			zygote.WriteResponse(conn, &zygote.SpawnResponse{HostPID: -1, Error: cerr.Error()})
 			return
 		}
 		cg = c
+		cgDoneNS = zygote.MonotonicNS()
 		log.Printf("cgroup 叶子已建: %s", cg.Path())
 	}
 
@@ -153,7 +163,11 @@ func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.
 		})
 		return
 	}
+	cloneDoneNS := zygote.MonotonicNS()
 
+	// 机器可读：并发时用 id 把母体这段与客户端 dispatch、payload abs 对回同一请求。
+	log.Printf("ANOLIX_MOTHER id=%s accept_ns=%d cgroup_ns=%d clone_done_ns=%d host_pid=%d",
+		wid, acceptNS, cgDoneNS, cloneDoneNS, pid)
 	log.Printf("worker 已生成: host_pid=%d (内部 getpid()=1)", pid)
 	zygote.WriteResponse(conn, &zygote.SpawnResponse{HostPID: pid})
 }

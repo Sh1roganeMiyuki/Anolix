@@ -12,6 +12,9 @@
 // 设计要点：
 //   - JSON 协议触发母体 clone worker，返回 worker 的宿主 PID
 //   - 拿到 PID 即可 kill/管理；写 runc state.json 让运行时纳管为后续迭代
+//   - 成功时额外输出一行机器可读的对账字段：
+//     SPAWN_META id=<id> dispatch_ns=<n> response_ns=<n> host_pid=<n>
+//     dispatch_ns 是发请求前取的 CLOCK_MONOTONIC，与 payload 的 PAYLOAD_META.abs_ns 同一根时间轴。
 package main
 
 import (
@@ -42,10 +45,11 @@ func main() {
 	// execve、rootfs 装修、seccomp 编译）都算进启动延迟。
 	t0ns := zygote.MonotonicNS()
 
-	// 自动生成 worker ID
+	// 自动生成 worker ID：带上 pid 与完整纳秒，避免并发/跨轮撞名
+	//（worker ID 会进 cgroup 叶子名，重名会让 os.Mkdir 直接 EEXIST）。
 	id := *workerID
 	if id == "" {
-		id = fmt.Sprintf("worker-%d", time.Now().UnixNano()%100000)
+		id = fmt.Sprintf("worker-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 
 	// --- 连接母体 ---
@@ -66,7 +70,6 @@ func main() {
 		T0NS:     t0ns,
 	}
 
-	t0 := time.Now()
 	if err := zygote.WriteRequest(conn, req); err != nil {
 		fmt.Fprintf(os.Stderr, "发送请求失败: %v\n", err)
 		os.Exit(1)
@@ -74,7 +77,8 @@ func main() {
 
 	// --- 读取响应 ---
 	resp, err := zygote.ReadResponse(conn)
-	elapsed := time.Since(t0)
+	responseNS := zygote.MonotonicNS()
+	elapsed := time.Duration(responseNS - t0ns)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "读取响应失败: %v\n", err)
 		os.Exit(1)
@@ -91,6 +95,8 @@ func main() {
 	fmt.Printf("  worker_id:   %s\n", id)
 	fmt.Printf("  command:     %v\n", args)
 	fmt.Printf("  spawn 耗时:  %v\n", elapsed.Round(time.Microsecond))
+	fmt.Printf("SPAWN_META id=%s dispatch_ns=%d response_ns=%d host_pid=%d\n",
+		id, t0ns, responseNS, resp.HostPID)
 	fmt.Printf("\n")
 	fmt.Printf("管理 worker:\n")
 	fmt.Printf("  kill %d          # 终止\n", resp.HostPID)

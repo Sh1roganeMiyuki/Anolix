@@ -8,7 +8,14 @@
 //   - runc 路径：anolix --timing 在入口处取，写进容器 env
 //   - zygote 路径：spawn 客户端在参数解析后取，母体透传给 worker-init
 //
-// 输出一行：PAYLOAD_NS=<纳秒>；拿不到起点时输出 PAYLOAD_NS=-1。
+// 输出两行（并发归因靠第二行）：
+//
+//	PAYLOAD_NS=<纳秒>                          ; 拿不到起点时输出 -1
+//	PAYLOAD_META run=<id> t0_ns=<n> abs_ns=<n> ; abs_ns = CLOCK_MONOTONIC 绝对时刻
+//
+// 第一行保持旧格式（ab/bench/harden 脚本按它解析）；第二行给并发场景对账用：
+// run id 把这一行对回某个 spawn 请求，abs_ns 与客户端 dispatch_ns、母体 accept_ns
+// 是同一根时间轴（都是 CLOCK_MONOTONIC），可以直接相减算排队与完成时刻。
 //
 // ⚠️ 必须静态编译（rootfs 里没有动态链接器）：
 //
@@ -43,4 +50,5 @@ func main() {
 		return
 	}
 	fmt.Printf("PAYLOAD_NS=%d\n", t1-t0)
+	fmt.Printf("PAYLOAD_META run=%s t0_ns=%d abs_ns=%d\n", os.Getenv("ANOLIX_RUN_ID"), t0, t1)
 }

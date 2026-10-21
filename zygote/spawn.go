@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // NamespaceFlags 是 worker 需要隔离的 6 个 namespace。
@@ -126,7 +127,18 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 	// 母体常驻，必须自己 Wait，否则 worker 退出后留僵尸；
 	// Wait 返回后顺手销毁叶子 cgroup（worker 已死 → 叶子空 → rmdir 成功）。
 	go func() {
-		if werr := cmd.Wait(); werr != nil {
+		werr := cmd.Wait()
+		// CPU 时间：wait4 顺带返回的 rusage（worker-init + payload 的 utime+stime）。
+		// 并发实验用它把“我们的开销”与“机器的排队”分开。
+		cpuNS := int64(0)
+		if ps := cmd.ProcessState; ps != nil {
+			if ru, ok := ps.SysUsage().(*syscall.Rusage); ok {
+				cpuNS = (ru.Utime.Sec+ru.Stime.Sec)*int64(time.Second) +
+					(ru.Utime.Usec+ru.Stime.Usec)*1000
+			}
+		}
+		log.Printf("ANOLIX_REAP id=%s host_pid=%d cpu_ns=%d err=%v", req.WorkerID, hostPID, cpuNS, werr)
+		if werr != nil {
 			// 记录退出状态：攻击测试靠它看 OOM（signal: killed）/ 信号 / 非零码
 			log.Printf("worker %d 退出异常: %v", hostPID, werr)
 		}

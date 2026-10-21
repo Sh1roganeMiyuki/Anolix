@@ -9,6 +9,7 @@
 | `build.sh` | 编译 `bin/{zygote,spawn,worker}` |
 | `mother.sh up\|down\|status\|log [N]` | 起/杀/查母体；`log` 看日志（worker 自打印都在这） |
 | `verify.sh ns\|memfd\|cgroup\|seccomp\|all` | 四条探针，验四套机制 |
+| `conc.sh` | K 并发压测：延迟分布 / 分段 / 吞吐 / CPU；默认 1 / nproc / 4×nproc |
 
 ## 前置
 
@@ -62,3 +63,25 @@ CGMEM=32 ./mother.sh up
 - **worker 的自打印不在 `verify.sh` 的输出里**——worker 的 stdout 接的是母体，所以去 `./mother.sh log` 看。
 - `mother.sh down` 会清 `/sys/fs/cgroup/anolix-*` 残留叶子；若有 worker 还没退，会提示"留"。
 - 这些脚本是**验证探针**，不是攻击工具——它们 spawn 的是我们自己的 `bin/worker`。
+
+## 并发压测（conc.sh）
+
+```bash
+./mother.sh up                      # 必须是新二进制：日志里要有 ANOLIX_MOTHER / ANOLIX_REAP
+K=10 ./scripts/zygote/conc.sh       # 单档
+./scripts/zygote/conc.sh            # 1 / nproc / 4×nproc
+TIERS="4 16" W=5 ./scripts/zygote/conc.sh
+```
+
+三个数在同一根 `CLOCK_MONOTONIC` 上，脚本按 worker id 归并：
+
+| 行 | 来源 | 含义 |
+|---|---|---|
+| `SPAWN_META` | 客户端 | `dispatch_ns`（起点）/ `response_ns`（母体回包） |
+| `ANOLIX_MOTHER` | 母体 | `accept_ns` / `cgroup_ns` / `clone_done_ns` |
+| `PAYLOAD_META` | payload | `abs_ns`（终点：第一条用户态指令） |
+| `ANOLIX_REAP` | 母体收尸 | `cpu_ns`（worker 的 utime+stime） |
+
+口径：**起点=dispatch，终点=payload 第一条指令**；吞吐 = n /（最早 dispatch → 最晚 abs）。
+原始数据落在 `$OUT/<tag>/`（默认 `.bench-tmp/conc/`）。
+不要用 `sudo` 跑客户端——特权动作都在母体，提权只会引入 `sudo secure_path` 这个额外变量。

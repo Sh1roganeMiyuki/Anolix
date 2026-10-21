@@ -139,7 +139,9 @@ func setupRootfs(rootfs string, harden bool) error {
 
 	// ⑥ 摘掉旧根（detach 立即生效，旧根就彻底从视野消失）。
 	_ = syscall.Unmount("/.oldroot", syscall.MNT_DETACH)
-	_ = os.Remove("/.oldroot")
+	// ⚠️ 不删 /.oldroot：rootfs 是所有 worker 共享的同一份目录，删掉它会和
+	// 别的 worker 的 mkdir+pivot_root 竞态（并发实测 6/64 报 pivot_root ENOENT）。
+	// 留一个空目录，代价为零。
 	zygote.Mark("detach_oldroot")
 
 	// ⑦ 挂基础设施：/proc（必需）、/dev（tmpfs，best-effort）。
