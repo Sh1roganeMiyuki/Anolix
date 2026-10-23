@@ -25,8 +25,11 @@ coverage.*
 # kprof.py 测试临时目录（bundle/state/最小策略/负载文件）
 /.kprof-tmp/
 
-# 并发压测原始数据（conc.sh 生成）
-/.bench-tmp/conc/
+# 实验/压测临时产物（bundle / state / kb / perf data / 临时 policy；脚本会重建）
+/.bench-tmp/
+
+# 一次性 strace 输出（不属于 03 篇的证据链）
+/.ls-seq.log
 
 # Python 缓存
 __pycache__/
@@ -44,3 +47,17 @@ __pycache__/
 # Go 临时缓存（沙箱只读 /tmp 时用）
 /.gotmp/
 /.gocache/
+
+# 本地临时/调试产物（perf/pprof、备份、Python 工具缓存）
+perf.data
+perf.data.*
+*.pprof
+*.prof
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
