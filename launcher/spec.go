@@ -33,15 +33,10 @@ var DefaultEnv = []string{
 	"HOSTNAME=" + containerHostname,
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// 【面试必会】policy → spec 的翻译总入口：本项目的心脏。
-//
-//	为什么：三段链（声明→翻译→执法）中间那段全在这里；错一个字段，
-//	内核里的行为就换一个样子（01/02/03 三篇文档验的全是这里的输出）。
-//	问法："一条策略从 JSON 到内核生效，中间经过哪些手？"
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 // buildSpec 把「策略 + 要跑的命令 + 根目录路径」翻译成一份 OCI 说明书。
+//
+// 这是三段链（声明 → 翻译 → 执法）的中间段；错一个字段，
+// 内核里的行为就换一个样子（01/02/03 三篇文档验的都是这里的输出）。
 //
 // 参数白话版：
 //   - policy：你写的规矩（seccomp 开关/名单、内存/进程/CPU 限额）；
@@ -57,13 +52,9 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 	// 再把 policy 里的三样限额（内存/进程数/CPU）合并上去；没填的字段保持 0 = 不设限。
 	applyResourceLimits(resources, policy.Resources)
 
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 【面试必会】6 个 namespace = 隔离模型本体；能讲清"哪间房管什么"是分水岭。
-	//   PID=进程号独立 / NET=网络独立 / IPC=进程间通信 / UTS=主机名 /
-	//   MNT=挂载视图 / CGROUP=cgroup 视图；用户命名空间见下面 rootless 分支。
-	//   问法："你的沙箱隔离了哪些维度？各自防住什么？"
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	// ② 填写「linux 块」：所有内核级隔离与限制都写在这里。
+	//   6 个 namespace = 隔离模型本体：PID=进程号 / NET=网络 / IPC=进程间通信 /
+	//   UTS=主机名 / MNT=挂载视图 / CGROUP=cgroup 视图；用户命名空间见下面 rootless 分支。
 	linux := &specs.Linux{
 		// 隔离的第一层：给容器开 6 间独立的「房间」（namespace）。
 		// 每间房 = 对某一类系统资源有自己的视图，逐个解释见行尾注释。
@@ -85,9 +76,8 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 		// seccomp 安检机：由 policy 翻译而来（下一个函数）。
 		Seccomp: buildSeccomp(policy.Seccomp),
 	}
-	// !!! 【值得会说】rootless 的"替身"机制：容器里的 root 其实映射到宿主当前用户。
-	//     面试常追问"容器里 uid=0 安全吗"——答案就看这段映射。
 	// ③ 非 root 运行（rootless）：追加「用户命名空间」与 ID 映射。
+	//   “替身”机制：容器里的 root 其实映射到宿主当前用户。
 	// 白话：让容器以为自己以 root 身份在跑，实际映射到宿主的当前用户——
 	// 于是容器内即便"是 root"，在宿主上也只相当于普通用户，干不了危险事。
 	if rootless {
@@ -116,9 +106,8 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 			Args:     command, // 容器里要执行什么程序
 			Env:      env,     // 环境变量
 			Cwd:      "/",     // 工作目录
-			// !!! 【值得会说】安全基线的两把锁：NoNewPrivileges（不许再提权）+ 空能力集。
-			//     追问常是："清空能力后容器里还剩什么特权途径？"
-			// 从这一刻起，这个进程及其后代都不允许再"提权"（阻断 setuid 类路径）。
+			// 安全基线的两把锁：NoNewPrivileges（不许再提权）+ 空能力集。
+			// 从这一刻起，这个进程及其后代都不允许再“提权”（阻断 setuid 类路径）。
 			NoNewPrivileges: true,
 			// 能力集清空：Linux capability 是"特权清单"，这里一个都不授予。
 			Capabilities: &specs.LinuxCapabilities{},
@@ -132,13 +121,8 @@ func buildSpec(policy *config.Policy, command, env []string, rootfsPath string, 
 	}
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// 【面试必会】安检机的三个参数来源：开关、盖章 errno、放行名单——全在这里落进说明书。
-//
-//	为什么：01 篇的"两个 38 / 哨兵 1145"、名单静默忽略，全部挂在这几个字段上。
-//	问法："你的 seccomp 策略是怎么变成内核里的过滤器的？"
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// 安检机的三个参数来源：开关、盖章 errno、放行名单——全在这里落进说明书。
+// 01 篇的“两个 38 / 哨兵 1145”、名单静默忽略，全部挂在这几个字段上。
 // buildSeccomp 把 policy 里的 seccomp 配置翻译成说明书里的 seccomp 一节。
 //
 // 白话：返回 nil = 说明书里不写这一节 = runc 不会给容器装"安检机"；
@@ -165,13 +149,8 @@ func buildSeccomp(s config.Seccomp) *specs.LinuxSeccomp {
 	}
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// 【面试必会】资源围栏的翻译点：policy 数字 → OCI 字段 →（runc 写入）内核文件。
-//
-//	为什么：02 篇全部实测证据链的源头；swap 缺口（未映射）也标在这。
-//	问法："你的 memory/pids/cpu 限额最终写到哪儿了？怎么验证？"
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// 资源围栏的翻译点：policy 数字 → OCI 字段 →（runc 写入）内核文件。
+// 02 篇全部实测证据链的源头；swap 缺口（未映射）也标在这。
 // applyResourceLimits 把 policy 的资源限额合并进说明书。
 //
 // 口诀：policy 里填了才写；填 0 就当作"不设这个限额"。
@@ -226,8 +205,9 @@ func defaultMounts(rootless bool) []specs.Mount {
 	}
 }
 
-// !!! 【值得会说】设备白名单：先全拒再逐放；"有设备文件 ≠ 能用设备"。
-// defaultResources 返回"基础资源规则"：设备访问白名单。
+// defaultResources 返回“基础资源规则”：设备访问白名单。
+//
+// 先全拒再逐放；“有设备文件 ≠ 能用设备”。
 //
 // 白话：即便 /dev 里有设备文件，也不代表能打开它——"能不能用"由 cgroup 的
 // 设备控制器单独把关。默认策略：先拒绝全部（第一条 Allow:false），再逐个放行 9 个标准设备。

@@ -37,6 +37,10 @@ func main() {
 	cgSwapMB := flag.Int("cg-swap", 0, "worker 可换出到 swap 的上限（MB），0=不许换出（memory.max 才是硬上限）")
 	cgPids := flag.Int("cg-pids", 0, "worker 进程/线程数上限，0=不限；需配合 --cgroup")
 	cgCPUPct := flag.Int("cg-cpu-pct", 0, "worker CPU 配额百分比（50=半核，200=两核），0=不限；需配合 --cgroup")
+	// 只输出机器可读行（ANOLIX_MOTHER / ANOLIX_REAP）。并发压测用：
+	// 每条人类可读日志都要抢 log 包的全局 mutex + 一次 write，
+	// K=64 时 5 条/请求 = 320 次串行写，本身就会改变被测对象。
+	quiet := flag.Bool("quiet", false, "只输出机器可读行，关掉人类可读日志（并发压测用）")
 	flag.Parse()
 
 	// 母体默认的 worker 资源围栏（每个 worker 一份；请求里可覆盖）。
@@ -108,14 +112,14 @@ func main() {
 		//   accept_return → handle_start    goroutine 创建 + 被调度
 		//   handle_start  → accept_ns       ReadRequest（读 socket + JSON 解析）
 		acceptReturnNS := zygote.MonotonicNS()
-		go handleSpawn(conn, acceptReturnNS, warmFile, *cgEnable, defLim)
+		go handleSpawn(conn, acceptReturnNS, warmFile, *cgEnable, defLim, *quiet)
 	}
 }
 
 // handleSpawn 处理一次 spawn 请求。
 // acceptReturnNS 是 ln.Accept() 返回的时刻（调用方传入）；本函数开头再取一个点，
 // 两者相减就是“goroutine 从创建到真正开始执行”的延迟。
-func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnable bool, defLim zygote.CgroupLimits) {
+func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnable bool, defLim zygote.CgroupLimits, quiet bool) {
 	defer conn.Close()
 
 	handleStartNS := zygote.MonotonicNS()
@@ -143,7 +147,9 @@ func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnabl
 		req.WorkerID = wid
 	}
 
-	log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, wid)
+	if !quiet {
+		log.Printf("spawn 请求: binary=%s args=%v id=%s", req.Binary, req.Args, wid)
+	}
 
 	// 资源围栏：为这个 worker 建专属叶子 cgroup。
 	// 关键：用 clone3(CLONE_INTO_CGROUP) 让 worker "出生即在册"，没有 #20 的启动空窗。
@@ -162,7 +168,9 @@ func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnabl
 		}
 		cg = c
 		cgDoneNS = zygote.MonotonicNS()
-		log.Printf("cgroup 叶子已建: %s", cg.Path())
+		if !quiet {
+			log.Printf("cgroup 叶子已建: %s", cg.Path())
+		}
 	}
 
 	pid, err := zygote.SpawnWorker(req, warmFile, cg)
@@ -179,6 +187,8 @@ func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnabl
 	// 机器可读：并发时用 id 把母体这段与客户端 dispatch、payload abs 对回同一请求。
 	log.Printf("ANOLIX_MOTHER id=%s accept_return_ns=%d handle_start_ns=%d accept_ns=%d cgroup_ns=%d clone_done_ns=%d host_pid=%d",
 		wid, acceptReturnNS, handleStartNS, acceptNS, cgDoneNS, cloneDoneNS, pid)
-	log.Printf("worker 已生成: host_pid=%d (内部 getpid()=1)", pid)
+	if !quiet {
+		log.Printf("worker 已生成: host_pid=%d (内部 getpid()=1)", pid)
+	}
 	zygote.WriteResponse(conn, &zygote.SpawnResponse{HostPID: pid})
 }

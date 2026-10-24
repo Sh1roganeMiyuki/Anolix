@@ -34,7 +34,7 @@ func main() {
 	os.Exit(run())
 }
 
-// !!! 【值得会说】main.go 是"接线层"：没有任何隔离逻辑；面试里它只用来讲清
+// main.go 是“接线层”：没有任何隔离逻辑，只负责下面这条链路：
 //
 //	"退出码从容器到 shell 的完整链路"（容器码 → runc → anolix → $?）。
 func run() int {
@@ -120,8 +120,7 @@ func run() int {
 		return 1
 	}
 
-	// !!! 【值得会说】Ctrl+C 的语义就在这里：变成"取消信号"，由 launcher 负责收场。
-	// 第 6 步：把 Ctrl+C / SIGTERM 变成"取消信号"（ctx）。
+	// 第 6 步：把 Ctrl+C / SIGTERM 变成“取消信号”（ctx），由 launcher 负责收场。
 	// 白话：按 Ctrl+C 时不是直接暴力杀，而是通知 launcher"该收场了"——
 	// 由它负责优雅终止容器并清理现场。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -136,9 +135,8 @@ func run() int {
 			return 1
 		}
 	}
-	// !!! 【值得会说】退出码链路最后一跳：容器码 → runc → anolix → shell。
-	//     137 / 143 的含义见 launcher.waitExitCode 处的【面试必会】标记。
-	// 退出码原样透传：0=成功；137=被 SIGKILL；143=被 SIGTERM……
+	// 退出码链路最后一跳：容器码 → runc → anolix → shell，原样透传。
+	// 0=成功；137=被 SIGKILL；143=被 SIGTERM……
 	if *timing {
 		// 总账：run() 入口 → 容器退出（含参数解析、策略加载、bundle 清理）。
 		fmt.Fprintf(os.Stderr, "anolix: [timing] 总计（入口→退出）: %v\n", time.Since(t0).Round(100*time.Microsecond))

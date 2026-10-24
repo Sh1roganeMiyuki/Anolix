@@ -156,12 +156,8 @@ func New(opts Options) (*Launcher, error) {
 		opts.Stderr = os.Stderr
 	}
 
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 【面试必会】rootless 判定：非 root 即开 user namespace（也就这一行）。
-	//   它牵出 02 篇的"cgroup 两分支"：无限额静默跳过 / 有限额硬报错。
-	//   问法："非 root 下你怎么保证还能跑容器？有什么限制？"
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 装进 Launcher。rootless 的判定：只要"当前有效用户不是 root"就开——
+	// 装进 Launcher。rootless 的判定：只要“当前有效用户不是 root”就开——
+	//   它牵出 02 篇的“cgroup 两分支”：无限额静默跳过 / 有限额硬报错。
 	// 这正是 README 里那句"非 root 自动启用 rootless，无需 sudo"。
 	return &Launcher{
 		opts:     opts,
@@ -259,23 +255,15 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 		}
 	}
 
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 【面试必会】CLI 子进程调用：anolix 不内嵌 runc，而是"喊"它起来干活。
-	//   为什么：这是"两种集成方式"的选型落点（可替换/可审计/故障边界），
+	// 第 5 步：喊 runc——anolix 不内嵌 runc，而是“喊”它起来干活。
+	//   为什么：这是“两种集成方式”的选型落点（可替换 / 可审计 / 故障边界），
 	//   也是取消、兜底、清理这些生命周期能力成立的前提。
-	//   问法："你怎么用 runc？为什么不用 libcontainer？" → 答两道边界 + 三种收益。
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 第 5 步：喊 runc——这就是"把另一个程序启动起来"的那一行（CLI 子进程调用）。
 	cmd := exec.CommandContext(ctx, l.runc, BuildRuncArgs(stateDir, l.bundle, l.id)...)
 	// 把容器里程序的输入输出，直接接到我们自己的终端上。
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = l.opts.Stdin, l.opts.Stdout, l.opts.Stderr
 	// 取消时先发 SIGTERM（runc 会转发给容器进程，让它优雅退出）；
 	// 若其未在 killWaitDelay 内退出，exec 会兜底强杀。
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 【面试必会】取消语义两层就写在这两行：先 SIGTERM 优雅退出，超时再兜底强杀。
-	//   为什么：容器树的杀灭靠"杀 init → 内核清空 PID namespace"，而入口必须可靠。
-	//   问法："定时/被打断时，你怎么保证不留孤儿？"
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// 取消语义两层：容器树的杀灭靠“杀 init → 内核清空 PID namespace”，而入口必须可靠。
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = killWaitDelay
 
@@ -293,11 +281,8 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ② runc 全程（拉起→容器退出）: %v\n",
 			time.Since(t1).Round(100*time.Microsecond))
 	}
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	// 【面试必会】退出码语义：被取消且拿不到容器的码时，自己填 128+SIGKILL=137。
-	//   为什么：137 会与"内核 OOM"撞值——判据靠文案与 dmesg（02 篇、笔记 04）。
-	//   问法："超时强杀后 echo $? 是多少？怎么和 OOM 区分？"
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// 退出码语义：被取消且拿不到容器的码时，自己填 128+SIGKILL=137。
+	//   137 会与“内核 OOM”撞值——判据靠文案与 dmesg（02 篇、笔记 04）。
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// 7a. ctx 被取消（超时 / Ctrl+C）：兜底强删容器；
 		// 拿不到退出码时自己填 128+9=137（SIGKILL 的惯用表示）。
@@ -388,11 +373,7 @@ func (l *Launcher) prepareBundle() error {
 //   - 没给 --rootfs：在 bundle 里建个空目录，说明书里写相对路径 "rootfs"；
 //   - 给了 --rootfs：转绝对路径 → 检查存在且是目录 → 展开软链接后写进说明书。
 //
-// !!! 【值得会说】EvalSymlinks 不是洁癖：runc 会校验"全链路无软链接"，
-//
-//	不规范化会被直接拒绝（01 篇故障 A 的根因）。
-//
-// 为什么要展开软链接（EvalSymlinks）：runc 会校验 rootfs 路径"全链路无软链接"
+// 为什么要展开软链接（EvalSymlinks）：runc 会校验 rootfs 路径“全链路无软链接”
 // （libcontainer/configs/validate 里比较 Clean 与 EvalSymlinks 的结果），
 // 不规范化会被直接拒绝（01 篇故障 A）。
 func (l *Launcher) prepareRootfs() error {
@@ -433,11 +414,10 @@ func (l *Launcher) cleanupBundle() {
 	}
 }
 
-// !!! 【值得会说】兜底清理的"先杀后删"：delete --force 走 cgroup 的 kill 路径——
-//
-//	它也解释了"cgroup 含活进程时 rmdir 报 EBUSY"那个坑。
-//
 // forceDeleteContainer 尽力强制删除可能仍存活的容器（忽略错误）。
+//
+// “先杀后删”的原因：delete --force 走 cgroup 的 kill 路径，
+// 这也解释了“cgroup 含活进程时 rmdir 报 EBUSY”那个坑。
 // 白话：就是再喊一声 runc delete --force <ID>；失败也不报（尽力而为）。
 func (l *Launcher) forceDeleteContainer() {
 	args := make([]string, 0, 4)
@@ -451,13 +431,6 @@ func (l *Launcher) forceDeleteContainer() {
 	_ = exec.CommandContext(ctx, l.runc, args...).Run()
 }
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// 【面试必会】128+signal 的翻译就发生在这几行：被信号杀 = 128+N。
-//
-//	为什么：这是"跨进程边界回来的唯一消息"；②OOM=137 与③超时=143/137 的差异根源。
-//	问法："为什么 shell 用 128+N 而不是直接报 N？"
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 // waitExitCode 等待命令退出，并把结果翻译成退出码。三种情形：
 //   - 正常退出：返回 (0, nil)；
 //   - 非零退出 / 被信号杀：返回 (码, nil)——被信号杀时为 128+信号号（137=被 SIGKILL）；

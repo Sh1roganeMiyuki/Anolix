@@ -13,8 +13,10 @@
 //   - JSON 协议触发母体 clone worker，返回 worker 的宿主 PID
 //   - 拿到 PID 即可 kill/管理；写 runc state.json 让运行时纳管为后续迭代
 //   - 成功时额外输出一行机器可读的对账字段：
-//     SPAWN_META id=<id> dispatch_ns=<n> response_ns=<n> host_pid=<n>
-//     dispatch_ns 是发请求前取的 CLOCK_MONOTONIC，与 payload 的 PAYLOAD_META.abs_ns 同一根时间轴。
+//     SPAWN_META id=<id> dispatch_ns=<n> after_dial_ns=<n> write_ns=<n> after_write_ns=<n> response_ns=<n> host_pid=<n>
+//     dispatch_ns 是 Dial 之前取的 CLOCK_MONOTONIC，与 payload 的 PAYLOAD_META.abs_ns 同一根时间轴。
+//     四个客户端点把“客户端侧”拆成：建连（dispatch→after_dial）/ 准备请求（→write_ns）/
+//     执行 write（→after_write_ns）/ 交给内核（after_write_ns→母体的 accept_return_ns）。
 package main
 
 import (
@@ -60,6 +62,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close()
+	// 建连完成时刻。与 t0ns 相减 = 客户端自己花在 connect 上的时间。
+	afterDialNS := zygote.MonotonicNS()
 	conn.SetDeadline(time.Now().Add(*timeout))
 
 	// --- 发送 spawn 请求 ---
@@ -70,10 +74,15 @@ func main() {
 		T0NS:     t0ns,
 	}
 
+	// 开始写入的时刻。与 afterDialNS 相减 = 客户端准备请求的时间。
+	writeNS := zygote.MonotonicNS()
 	if err := zygote.WriteRequest(conn, req); err != nil {
 		fmt.Fprintf(os.Stderr, "发送请求失败: %v\n", err)
 		os.Exit(1)
 	}
+	// 写入返回的时刻。与 writeNS 相减 = 客户端实际花在 write 上的时间；
+	// 与母体的 accept_return_ns 相减 = 数据穿过内核、被 accept 取出的时间。
+	afterWriteNS := zygote.MonotonicNS()
 
 	// --- 读取响应 ---
 	resp, err := zygote.ReadResponse(conn)
@@ -95,8 +104,8 @@ func main() {
 	fmt.Printf("  worker_id:   %s\n", id)
 	fmt.Printf("  command:     %v\n", args)
 	fmt.Printf("  spawn 耗时:  %v\n", elapsed.Round(time.Microsecond))
-	fmt.Printf("SPAWN_META id=%s dispatch_ns=%d response_ns=%d host_pid=%d\n",
-		id, t0ns, responseNS, resp.HostPID)
+	fmt.Printf("SPAWN_META id=%s dispatch_ns=%d after_dial_ns=%d write_ns=%d after_write_ns=%d response_ns=%d host_pid=%d\n",
+		id, t0ns, afterDialNS, writeNS, afterWriteNS, responseNS, resp.HostPID)
 	fmt.Printf("\n")
 	fmt.Printf("管理 worker:\n")
 	fmt.Printf("  kill %d          # 终止\n", resp.HostPID)

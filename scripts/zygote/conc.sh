@@ -99,7 +99,7 @@ run_tier() {
   : > "$dir/all.tsv"
   awk '/^SPAWN_META /{
         split("", v); for(i=2;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]}
-        print "C", v["id"], v["dispatch_ns"], v["response_ns"]
+        print "C", v["id"], v["dispatch_ns"], v["response_ns"], v["after_dial_ns"], v["write_ns"], v["after_write_ns"]
       }' "$dir"/*.spawn >> "$dir/all.tsv"
   { grep "ANOLIX_MOTHER id=$tag" "$LOG" 2>/dev/null | awk '{
         split("", v); for(i=2;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]}
@@ -114,6 +114,7 @@ run_tier() {
   #   dispatch→payload / dispatch→response / accept→dispatch / accept→cgroup /
   #   cgroup→clone_done / clone_done→payload
   # all.tsv 的 M 行现在是 7 列：M id accept_ns cgroup_ns clone_done_ns accept_return_ns handle_start_ns
+  # C 行是 7 列：C id dispatch_ns response_ns after_dial_ns write_ns after_write_ns
   # （后两列是 v2 新增；旧母体二进制不会输出，值为空字符串，相减会得到 0）
   awk -v summary="$dir/summary" '
     $1=="C"{disp[$2]=$3+0; resp[$2]=$4+0; ids[$2]=1}

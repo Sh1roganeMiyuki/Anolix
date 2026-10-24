@@ -6,7 +6,7 @@
 #   status 看母体在不在跑
 #   log N  tail 最近 N 行日志（worker 的自打印都在这里）
 #
-# 可用环境变量覆盖默认：SOCK / LOG / WARM / CGMEM / CGPIDS / CGCPU
+# 可用环境变量覆盖默认：SOCK / LOG / WARM / CGMEM / CGPIDS / CGCPU / QUIET
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SOCK="${SOCK:-/tmp/anolix-zygote.sock}"
@@ -15,6 +15,7 @@ WARM="${WARM:-64}"        # 共享 memfd 大小（MB）
 CGMEM="${CGMEM:-256}"     # worker 内存上限（MB）；默认留足余量，别误 OOM
 CGPIDS="${CGPIDS:-200}"   # worker 进程数上限
 CGCPU="${CGCPU:-0}"       # worker CPU 配额百分比；0=不限
+QUIET="${QUIET:-}"       # 非空 = 传 --quiet（只保留机器可读行，并发压测用）
 
 up() {
   sudo pkill -f 'bin/zygote' 2>/dev/null || true
@@ -23,13 +24,15 @@ up() {
   cd "$ROOT"
   local cgargs=(--cgroup --cg-memory "$CGMEM" --cg-pids "$CGPIDS")
   if [ "$CGCPU" -gt 0 ]; then cgargs+=(--cg-cpu-pct "$CGCPU"); fi
+  local qargs=()
+  if [ -n "$QUIET" ]; then qargs+=(--quiet); fi
   # setsid 脱离终端；</dev/null 断输入；日志落文件
-  sudo bash -c "setsid ./bin/zygote --socket '$SOCK' --warm '$WARM' ${cgargs[*]} >'$LOG' 2>&1 </dev/null &"
+  sudo bash -c "setsid ./bin/zygote --socket '$SOCK' --warm '$WARM' ${qargs[*]} ${cgargs[*]} >'$LOG' 2>&1 </dev/null &"
   sleep 0.8
   if pgrep -f 'bin/zygote' >/dev/null; then
     echo "mother up: pid=$(pgrep -f 'bin/zygote' | head -1)  sock=$SOCK"
     echo "  log=$LOG"
-    echo "  warm=${WARM}MB  cgroup: mem=${CGMEM}MB pids=${CGPIDS} cpu=${CGCPU}%"
+    echo "  warm=${WARM}MB  cgroup: mem=${CGMEM}MB pids=${CGPIDS} cpu=${CGCPU}%  quiet=${QUIET:-off}"
   else
     echo "!! 母体没起来，日志末尾："; tail -n 20 "$LOG" || true; exit 1
   fi
