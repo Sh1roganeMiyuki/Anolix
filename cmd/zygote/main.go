@@ -41,6 +41,8 @@ func main() {
 	// 每条人类可读日志都要抢 log 包的全局 mutex + 一次 write，
 	// K=64 时 5 条/请求 = 320 次串行写，本身就会改变被测对象。
 	quiet := flag.Bool("quiet", false, "只输出机器可读行，关掉人类可读日志（并发压测用）")
+	// 归因用：只写 memory.max，用来判断“写 cgroup 文件”对 clone3 的干扰有多大。
+	cgMinimal := flag.Bool("cg-minimal", false, "实验用：cgroup 只写 memory.max，跳过 swap/pids/cpu")
 	flag.Parse()
 
 	// 母体默认的 worker 资源围栏（每个 worker 一份；请求里可覆盖）。
@@ -56,6 +58,7 @@ func main() {
 		defLim.CPUQuotaUS = int64(*cgCPUPct) * 1000 // 周期 100ms → 1% = 1000µs
 		defLim.CPUPeriodUS = 100000
 	}
+	defLim.Minimal = *cgMinimal
 
 	log.SetPrefix("zygote-mother: ")
 	log.SetFlags(log.Ltime | log.Lmicroseconds)

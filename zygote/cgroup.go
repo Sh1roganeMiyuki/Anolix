@@ -50,6 +50,10 @@ type CgroupLimits struct {
 	PidsMax      int64 `json:"pids_max,omitempty"`
 	CPUQuotaUS   int64 `json:"cpu_quota_us,omitempty"`
 	CPUPeriodUS  int64 `json:"cpu_period_us,omitempty"`
+
+	// Minimal 只写 memory.max，跳过 swap/pids/cpu。仅用于归因实验：
+	// 判断“写文件”本身对 clone3(CLONE_INTO_CGROUP) 造成了多少干扰。
+	Minimal bool `json:"-"`
 }
 
 // WorkerCgroup 是一个 worker 专属的叶子 cgroup（建好、写好限额、目录 fd 已打开）。
@@ -92,16 +96,18 @@ func CreateWorkerCgroup(id string, lim CgroupLimits) (*WorkerCgroup, error) {
 		if err := writeLim("memory.max", strconv.FormatInt(lim.MemoryMaxBytes, 10)); err != nil {
 			return rollback(err)
 		}
-		// 顺手把 swap 也封上：否则 memory.max 会被"换出"绕过（只限常驻、不 OOM）。
+		// 顺手把 swap 也封上：否则 memory.max 会被“换出”绕过（只限常驻、不 OOM）。
 		// best-effort：无 swap 记账的系统写失败就算了。
-		_ = writeLim("memory.swap.max", strconv.FormatInt(lim.SwapMaxBytes, 10))
+		if !lim.Minimal {
+			_ = writeLim("memory.swap.max", strconv.FormatInt(lim.SwapMaxBytes, 10))
+		}
 	}
-	if lim.PidsMax > 0 {
+	if lim.PidsMax > 0 && !lim.Minimal {
 		if err := writeLim("pids.max", strconv.FormatInt(lim.PidsMax, 10)); err != nil {
 			return rollback(err)
 		}
 	}
-	if lim.CPUQuotaUS > 0 {
+	if lim.CPUQuotaUS > 0 && !lim.Minimal {
 		period := lim.CPUPeriodUS
 		if period <= 0 {
 			period = 100000 // 默认 100ms 周期
