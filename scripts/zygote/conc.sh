@@ -10,6 +10,7 @@
 #   K=10 ./scripts/zygote/conc.sh          # 单档
 #   ./scripts/zygote/conc.sh               # 默认三档：1 / nproc / 4×nproc
 #   TIERS="4 16" W=5 ./scripts/zygote/conc.sh
+#   CLIENT_PIN="taskset -c 0-7" K=64 ./scripts/zygote/conc.sh   # 客户端绑核（归因用）
 #
 # 前置：
 #   ./scripts/zygote/build.sh
@@ -31,6 +32,14 @@ W="${W:-3}"                        # 热身次数（串行，不计入结果）
 POLL_TIMEOUT="${POLL_TIMEOUT:-10}" # 等 payload 打点的秒数
 OUT="${OUT:-$ROOT/.bench-tmp/conc}"
 NPROC="$(nproc)"
+
+# 可选：给客户端加命令前缀（归因实验用，默认空；不影响默认行为）。例：
+#   CLIENT_PIN="taskset -c 0-7" K=64 ./scripts/zygote/conc.sh
+# 用途：客户端绑一组核、母体绑另一组，看 queue 段（dispatch→accept）是否下降。
+# ⚠️ 本机拓扑：0-1/2-3/.../14-15 成对（每物理核 2 超线程），所以 0-7 与 8-15 不共享物理核。
+CLIENT_PIN="${CLIENT_PIN:-}"
+PIN=()
+if [ -n "$CLIENT_PIN" ]; then read -ra PIN <<< "$CLIENT_PIN"; fi
 
 [ -S "$SOCK" ] || { echo "!! 母体没起：./scripts/zygote/mother.sh up"; exit 1; }
 [ -w "$SOCK" ] || { echo "!! $SOCK 不可写（权限？）"; exit 1; }
@@ -66,7 +75,7 @@ run_tier() {
   local pids=() failed=0 i id p
   for i in $(seq 1 "$k"); do
     id="${tag}-$i"
-    "$ROOT/bin/spawn" --socket "$SOCK" --id "$id" -- \
+    "${PIN[@]}" "$ROOT/bin/spawn" --socket "$SOCK" --id "$id" -- \
       "$INIT" --rootfs "$ROOTFS" -- /tprobe \
       >"$dir/$id.spawn" 2>"$dir/$id.err" &
     pids+=("$!")
@@ -94,7 +103,7 @@ run_tier() {
       }' "$dir"/*.spawn >> "$dir/all.tsv"
   { grep "ANOLIX_MOTHER id=$tag" "$LOG" 2>/dev/null | awk '{
         split("", v); for(i=2;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]}
-        print "M", v["id"], v["accept_ns"], v["cgroup_ns"], v["clone_done_ns"]
+        print "M", v["id"], v["accept_ns"], v["cgroup_ns"], v["clone_done_ns"], v["accept_return_ns"], v["handle_start_ns"]
       }'; } >> "$dir/all.tsv" || true
   { grep "PAYLOAD_META run=$tag" "$LOG" 2>/dev/null | awk '{
         split("", v); for(i=2;i<=NF;i++){split($i,kv,"="); v[kv[1]]=kv[2]}
@@ -104,6 +113,8 @@ run_tier() {
   # 归并成 rows.tsv：每行 = 一条请求的 6 个纳秒差
   #   dispatch→payload / dispatch→response / accept→dispatch / accept→cgroup /
   #   cgroup→clone_done / clone_done→payload
+  # all.tsv 的 M 行现在是 7 列：M id accept_ns cgroup_ns clone_done_ns accept_return_ns handle_start_ns
+  # （后两列是 v2 新增；旧母体二进制不会输出，值为空字符串，相减会得到 0）
   awk -v summary="$dir/summary" '
     $1=="C"{disp[$2]=$3+0; resp[$2]=$4+0; ids[$2]=1}
     $1=="M"{acc[$2]=$3+0; cg[$2]=$4+0; cl[$2]=$5+0; hasM++}
@@ -195,7 +206,7 @@ done
 echo
 echo "=== 热身 $W 次（串行，不计入结果） ==="
 for i in $(seq 1 "$W"); do
-  "$ROOT/bin/spawn" --socket "$SOCK" --id "warm-$(date +%s%N)-$i" -- \
+  "${PIN[@]}" "$ROOT/bin/spawn" --socket "$SOCK" --id "warm-$(date +%s%N)-$i" -- \
     "$INIT" --rootfs "$ROOTFS" -- /tprobe >/dev/null 2>&1 || true
 done
 

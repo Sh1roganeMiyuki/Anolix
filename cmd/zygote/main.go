@@ -102,13 +102,23 @@ func main() {
 		if err != nil {
 			return
 		}
-		go handleSpawn(conn, warmFile, *cgEnable, defLim)
+		// 观测：连接已从内核队列取出、但还没交给处理函数的时刻。
+		// 配合 handleSpawn 里的两个点，把原来的 queue 段（dispatch→accept）拆成三段：
+		//   dispatch      → accept_return   客户端 Dial + 写 + 内核队列等待
+		//   accept_return → handle_start    goroutine 创建 + 被调度
+		//   handle_start  → accept_ns       ReadRequest（读 socket + JSON 解析）
+		acceptReturnNS := zygote.MonotonicNS()
+		go handleSpawn(conn, acceptReturnNS, warmFile, *cgEnable, defLim)
 	}
 }
 
 // handleSpawn 处理一次 spawn 请求。
-func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.CgroupLimits) {
+// acceptReturnNS 是 ln.Accept() 返回的时刻（调用方传入）；本函数开头再取一个点，
+// 两者相减就是“goroutine 从创建到真正开始执行”的延迟。
+func handleSpawn(conn net.Conn, acceptReturnNS int64, warmFile *os.File, cgEnable bool, defLim zygote.CgroupLimits) {
 	defer conn.Close()
+
+	handleStartNS := zygote.MonotonicNS()
 
 	req, err := zygote.ReadRequest(conn)
 	if err != nil {
@@ -120,8 +130,9 @@ func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.
 		return
 	}
 
-	// 观测：接住请求的时刻。与客户端 dispatch_ns、payload 的 abs_ns 同一根
-	// CLOCK_MONOTONIC，三个点可直接相减，拆出 socket 排队 / cgroup / clone+exec。
+	// 观测：请求读完的时刻（ReadRequest 返回之后）。
+	// 与 dispatch_ns / accept_return_ns / handle_start_ns / abs_ns 同一根 CLOCK_MONOTONIC，
+	// 可直接相减，拆出“建连排队 / 调度 / 读请求 / cgroup / clone / worker 侧”六段。
 	acceptNS := zygote.MonotonicNS()
 
 	// worker id 先定死：cgroup 叶子名、日志、注入 worker 的 ANOLIX_RUN_ID 共用同一个。
@@ -166,8 +177,8 @@ func handleSpawn(conn net.Conn, warmFile *os.File, cgEnable bool, defLim zygote.
 	cloneDoneNS := zygote.MonotonicNS()
 
 	// 机器可读：并发时用 id 把母体这段与客户端 dispatch、payload abs 对回同一请求。
-	log.Printf("ANOLIX_MOTHER id=%s accept_ns=%d cgroup_ns=%d clone_done_ns=%d host_pid=%d",
-		wid, acceptNS, cgDoneNS, cloneDoneNS, pid)
+	log.Printf("ANOLIX_MOTHER id=%s accept_return_ns=%d handle_start_ns=%d accept_ns=%d cgroup_ns=%d clone_done_ns=%d host_pid=%d",
+		wid, acceptReturnNS, handleStartNS, acceptNS, cgDoneNS, cloneDoneNS, pid)
 	log.Printf("worker 已生成: host_pid=%d (内部 getpid()=1)", pid)
 	zygote.WriteResponse(conn, &zygote.SpawnResponse{HostPID: pid})
 }
