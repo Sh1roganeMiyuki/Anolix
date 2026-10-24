@@ -107,7 +107,7 @@ memory.stat    → pswpout 116020 ← swap 是活的
 - **机制**：seccomp **由进程自己装**（母体代装会自缚 + 全员共享一份，#19 坑1），且**紧贴 execve**。本实现里 worker 一启动就先装。
 - **名单来源**：`config.DefaultAllowedSyscalls`（Anolix 沙箱那份名单）。
 
-**数据一（A/B 探针，对照教科书级）**：
+**数据一（A/B 探针）**：
 
 ```
 A（装 seccomp）： sethostname → EPERM ✅   bpf → EPERM ✅   keyctl → EPERM ✅
