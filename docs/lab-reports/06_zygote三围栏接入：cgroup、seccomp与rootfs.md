@@ -72,8 +72,17 @@ cpu.max     : max 100000
 [attack-pids] 第 194 个 fork 失败: fork/exec /bin/sleep: resource temporarily unavailable
 ```
 
-> `pids.max` 数的是 **task（线程）**，不是"进程数"。
-> worker 是 Go 程序，自带 ~6 条线程；**194 个子进程 + 其 ~6 线程 = 200** → 卡在第 194 个。
+> `pids.max` 数的是 **task（线程）**，不是“进程数”。
+>
+> 这次 fork 出来的是 **`/bin/sleep`——C 写的单线程程序，每个只占 1 个 task**；worker 自己是 Go 程序，runtime 自带 ~6 条线程：
+>
+> ```
+> 6（worker 自己的 Go 线程）+ 194 × 1（194 个 sleep，各占一条线程）= 200
+> ```
+>
+> 所以卡在第 194 个。
+>
+> ⚠️ 换个条件结果完全不同：如果 fork 出来的**也是同一个 Go 程序**（每个 6 线程），那只能 fork `200 ÷ 6 ≈ 33` 个。
 
 **数据三（执法：`memory.max=64MB`，worker touch 512MB —— 居然没死）**：
 
@@ -170,7 +179,7 @@ tmp
 ### 1. 结论
 
 1. **cgroup 能"出生即在册"**：`clone3(CLONE_INTO_CGROUP)` 消掉"先 clone 再迁移"的启动空窗；
-2. **`pids.max` 限的是线程数**（实测：194 子进程 + ~6 线程 = 200）；
+2. **`pids.max` 限的是线程数**（实测：194 个单线程子进程 + worker 自己的 ~6 条 Go 线程 = 200）；
 3. **`memory.max` 只限常驻**：有 swap 且 `swap.max` 不限时，炸弹退化成 thrashing——`memory.max + memory.swap.max` 才共同定义硬上限；
 4. **seccomp 必须自己装、字体紧贴 execve**；探针 A/B 证明它是唯一挡住 root worker 危险 syscall 的墙；
 5. **rootfs 靠薄 init**：`pivot_root` 换根后 worker 只看得到 rootfs，且 init 让**任意 payload** 也受 seccomp 覆盖。
