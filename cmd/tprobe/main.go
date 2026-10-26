@@ -1,8 +1,9 @@
 // Command tprobe 是“跑到就报时”的最小 payload，用来做 A/B 启动对比的裁判。
 //
-// 两条启动路径（runc 经 anolix / 自建 zygote 母体）都跑同一个 tprobe，
+// 两条启动路径（runc/crun 经 anolix / 自建 zygote 母体）都跑同一个 tprobe，
 // 都在这里停下并输出"相对起点"的纳秒数。于是两侧的终点是同一个瞬间——
-// payload 的第一条用户态指令，而不是"容器退出了""init 起来了"这种模糊口径。
+// payload main 的首条语句（Go runtime 初始化在此前完成，但它仍包含在
+// t0 → main 这段墙钟里），而不是"容器退出了""init 起来了"这种模糊口径。
 //
 // 起点由父进程经 ANOLIX_T0_NS 注入（CLOCK_MONOTONIC 纳秒）：
 //   - runc 路径：anolix --timing 在入口处取，写进容器 env

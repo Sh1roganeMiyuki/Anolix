@@ -43,7 +43,7 @@ func main() {
 	}
 
 	// 端到端计时的起点：与 anolix 的 --timing 同口径，都在“参数解析完成”之后取。
-	// 从这里到 payload 第一条指令之间的一切（socket 往返、母体排队、clone、
+	// 从这里到 payload main 首条语句之间的一切（socket 往返、母体排队、clone、
 	// execve、rootfs 装修、seccomp 编译）都算进启动延迟。
 	t0ns := zygote.MonotonicNS()
 

@@ -79,9 +79,9 @@ TIERS="4 16" W=5 ./scripts/zygote/conc.sh
 |---|---|---|
 | `SPAWN_META` | 客户端 | `dispatch_ns`（起点）/ `response_ns`（母体回包） |
 | `ANOLIX_MOTHER` | 母体 | `accept_ns` / `cgroup_ns` / `clone_done_ns` |
-| `PAYLOAD_META` | payload | `abs_ns`（终点：第一条用户态指令） |
+| `PAYLOAD_META` | payload | `abs_ns`（终点：main 首条语句；Go runtime 初始化已完成，但仍含在墙钟里） |
 | `ANOLIX_REAP` | 母体收尸 | `cpu_ns`（worker 的 utime+stime） |
 
-口径：**起点=dispatch，终点=payload 第一条指令**；吞吐 = n /（最早 dispatch → 最晚 abs）。
+口径：**起点=dispatch，终点=payload main 首条语句**；吞吐 = n /（最早 dispatch → 最晚 abs）。
 原始数据落在 `$OUT/<tag>/`（默认 `.bench-tmp/conc/`）。
 不要用 `sudo` 跑客户端——特权动作都在母体，提权只会引入 `sudo secure_path` 这个额外变量。

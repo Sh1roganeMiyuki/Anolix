@@ -55,9 +55,10 @@ func run() int {
 	policyPath := fs.String("policy", "", "policy JSON 文件路径；缺省使用内置策略")
 	rootfs := fs.String("rootfs", "", "容器根文件系统目录；缺省使用空 rootfs")
 	bundleDir := fs.String("bundle", "", "OCI bundle 目录；缺省使用临时目录并自动清理")
-	stateDir := fs.String("state-dir", "", "runc --root 状态目录；缺省使用 runc 默认值")
+	stateDir := fs.String("state-dir", "", "运行时 --root 状态目录；缺省使用运行时默认值")
 	id := fs.String("id", "", "容器 ID；缺省自动生成")
-	runcPath := fs.String("runc", "", "runc 可执行文件路径；缺省在 PATH 中查找")
+	runtimeName := fs.String("runtime", "", "OCI 运行时：runc（缺省）/ crun / 可执行文件路径")
+	runcPath := fs.String("runc", "", "runc 可执行文件路径（兼容旧参数；新代码用 --runtime）")
 	timeout := fs.Duration("timeout", 0, "容器运行超时（如 30s）；0 表示不限")
 	keepBundle := fs.Bool("keep-bundle", false, "退出后保留 bundle 目录（调试用）")
 	timing := fs.Bool("timing", false, "打印各阶段耗时（测启动开销用）")
@@ -88,7 +89,7 @@ func run() int {
 
 	// --timing 的两个起点锚：
 	//   t0ns   = CLOCK_MONOTONIC 纳秒，跨进程可比——写进容器 env，供 payload（如 /tprobe）
-	//            自报“从本进程入口到 payload 第一条指令”的耗时；
+	//            自报“从本进程入口到 payload main 首条语句”的耗时；
 	//   uptime = /proc/uptime，人类可读，用于与容器内读数对账。
 	var t0ns int64
 	if *timing {
@@ -106,6 +107,7 @@ func run() int {
 		Rootfs:        *rootfs,
 		BundleDir:     *bundleDir,
 		StateDir:      *stateDir,
+		Runtime:       *runtimeName,
 		RuncPath:      *runcPath,
 		Policy:        policy,
 		Command:       command,
@@ -157,15 +159,17 @@ flags:
   --policy PATH    policy JSON 文件路径；缺省使用内置策略
   --rootfs PATH    容器根文件系统目录；缺省使用空 rootfs
   --bundle PATH    OCI bundle 目录；缺省使用临时目录并自动清理
-  --state-dir PATH runc --root 状态目录；缺省使用 runc 默认值
+  --state-dir PATH 运行时 --root 状态目录；缺省使用运行时默认值
   --id NAME        容器 ID；缺省自动生成
-  --runc PATH      runc 可执行文件路径；缺省在 PATH 中查找
+  --runtime NAME   OCI 运行时：runc（缺省）/ crun / 可执行文件路径
+  --runc PATH      runc 可执行文件路径（兼容旧参数；新代码用 --runtime）
   --timeout DUR    容器运行超时（如 30s）；0 表示不限
   --keep-bundle    退出后保留 bundle 目录（调试用）
   --timing         打印各阶段耗时（测启动开销用）
 
 示例:
   anolix run --policy examples/policy.json --rootfs ./rootfs -- /probe
+  anolix run --runtime crun --rootfs ./rootfs -- /probe
   anolix run --rootfs ./rootfs -- /probe hold 60   # 演示超时/中断
 `)
 }

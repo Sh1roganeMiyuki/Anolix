@@ -3,7 +3,8 @@
 #
 # 口径（三个旋钮，缺一不可）：
 #   起点 = 各客户端发请求前的 CLOCK_MONOTONIC（SPAWN_META.dispatch_ns）
-#   终点 = payload 第一条用户态指令（PAYLOAD_META.abs_ns）
+#   终点 = payload main 的首条语句（PAYLOAD_META.abs_ns；Go runtime 初始化已完成，
+#          但仍包含在起点 → main 这段墙钟里）
 #   条件 = K / nproc / 母体配置（--warm / --cgroup）/ 是否热身
 #
 # 用法：
@@ -168,7 +169,7 @@ run_tier() {
     "$k" "$failed" "$gotp" "$k" "$reap" "$miss" "$missM"
   printf '  起跑斜坡  %.1f ms（最早→最晚 dispatch）\n' "$(awk -v x="$skew" 'BEGIN{print x/1e6}')"
   printf '  窗口      %.1f ms（最早 dispatch → 最晚 abs）\n' "$(awk -v x="$span" 'BEGIN{print x/1e6}')"
-  echo "  延迟（dispatch → payload 第一条指令，ms）"
+  echo "  延迟（dispatch → payload main 首条语句，ms）"
   emit "$dir/col1" "端到端"
   echo "  分段（ms）"
   if [ "$hasM" -gt 0 ]; then
@@ -191,7 +192,7 @@ run_tier() {
 
 echo "=== 环境：nproc=$NPROC  kernel=$(uname -r)  load=$(cut -d' ' -f1-3 /proc/loadavg) ==="
 echo "    母体日志：$LOG"
-echo "    口径：起点=客户端 dispatch，终点=payload 第一条指令；窗口=最早 dispatch→最晚 abs"
+echo "    口径：起点=客户端 dispatch，终点=payload main 首条语句；窗口=最早 dispatch→最晚 abs"
 
 if [ -n "${K:-}" ]; then
   TIERS="$K"
@@ -220,5 +221,5 @@ done
 echo
 echo "⚠️ 口径边界："
 echo "   - 窗口外还有 K 个客户端的进程启动成本（每个约 1ms CPU），它不进延迟，但会抢 CPU。"
-echo "   - 吞吐 = 到达 payload 第一条指令的速率，不是任务完成率（tprobe 打完点即退出）。"
+echo "   - 吞吐 = 到达 payload main 首条语句的速率，不是任务完成率（tprobe 打完点即退出）。"
 exit "$rc"

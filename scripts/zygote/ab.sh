@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# A/B 启动对比：控制变量后，比"从父进程入口到 payload 第一条指令"的耗时。
+# A/B 启动对比：控制变量后，比"从父进程入口到 payload main 首条语句"的耗时。
 #
 # 控制的变量：
 #   ① 同一个 payload        —— 都跑 rootfs/tprobe（静态 Go，一进入 main 就报时）
-#   ② 同一个终点            —— payload 的第一条用户态指令，不是"容器退出"或"init 起来"
+#   ② 同一个终点            —— payload main 的首条语句（Go runtime 初始化已完成，
+#                              但它仍包含在 t0 → main 这段墙钟里），不是"容器退出"或"init 起来"
 #   ③ 同一个根目录          —— 都用 ./rootfs
 #   ④ 同一个起点口径        —— 都在"参数解析完成"之后取 CLOCK_MONOTONIC
 #        runc 路径：anolix main 里取 → 注入容器 env
@@ -79,7 +80,7 @@ stat() {
 }
 
 echo
-echo "=== 结果：父进程入口 → payload 第一条指令 ==="
+echo "=== 结果：父进程入口 → payload main 首条语句 ==="
 stat "$A" runc
 stat "$B" zygote
 

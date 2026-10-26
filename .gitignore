@@ -41,6 +41,9 @@ __pycache__/
 *.swp
 .DS_Store
 
+# 本地部署的运行时（crun 解包产物，见 scripts/deploy-crun.sh）
+/.tools/
+
 # 构建产物
 /bin/
 

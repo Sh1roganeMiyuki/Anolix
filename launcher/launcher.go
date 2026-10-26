@@ -1,16 +1,16 @@
-// Package launcher 负责按 policy 组装 runc 启动参数，
-// 生成 OCI bundle 并拉起容器执行命令。
+// Package launcher 负责把策略翻译成 OCI bundle，并选择启动层（runc / crun）
+// 拉起容器执行命令。
 //
 // 全流程（读代码时对照这张图）：
 //
 //	① 准备说明书：建 bundle 目录 → 写 config.json（内容由 spec.go 生成）
-//	② 喊 runc：把 runc 当独立程序启动（exec），参数 = runc run --bundle <目录> <ID>
-//	③ 等它跑完：读 runc 的退出码，原样透传（被信号杀 = 128+信号号）
-//	④ 超时/被打断：先对 runc 说"请退出"（SIGTERM），10 秒不走就强杀
-//	⑤ 兜底清理：runc delete --force + 删临时 bundle 目录
+//	② 喊运行时：把选定的运行时当独立程序启动（exec），参数 = <runtime> run --bundle <目录> <ID>
+//	③ 等它跑完：读退出码，原样透传（被信号杀 = 128+信号号）
+//	④ 超时/被打断：先对运行时说"请退出"（SIGTERM），10 秒不走就强杀
+//	⑤ 兜底清理：<runtime> delete --force + 删临时 bundle 目录
 //
-// 一句话：本文件是"保姆"——负责把 runc 叫起来、看住它、收场；
-// 真正干活的是 runc（它再去内核里建设施）。
+// 一句话：本文件是"保姆"——负责把运行时叫起来、看住它、收场；
+// 真正干活的是运行时（它再去内核里建设施）。具体是 runc 还是 crun，由 runtime.go 决定。
 package launcher
 
 import (
@@ -46,11 +46,16 @@ type Options struct {
 	// BundleDir OCI bundle 目录（说明书+货物放哪）；为空时在系统临时目录创建，
 	// 退出后自动删除（--keep-bundle 可保留，便于事后翻看）。
 	BundleDir string
-	// StateDir 传给 runc --root 的状态目录。
-	// 白话：runc 的"记账本"放哪——它把每个容器的运行状态记在这里，
-	// 之后 runc list / delete 都从这个本子里查；rootless 时必须放在用户可写的位置。
+	// StateDir 传给运行时 --root 的状态目录。
+	// 白话：运行时的"记账本"放哪——它把每个容器的运行状态记在这里，
+	// 之后 list / delete 都从这个本子里查；rootless 时必须放在用户可写的位置。
 	StateDir string
-	// RuncPath runc 可执行文件路径；为空时在 PATH 中查找 "runc"。
+	// Runtime 选择启动层的 OCI 运行时："runc"（缺省）、"crun"，
+	// 或可执行文件路径（如 /usr/bin/crun、./bin/crun）。
+	// 它只影响"谁来执行 config.json"，不影响策略与 spec 的内容。
+	Runtime string
+	// RuncPath 是 Runtime 的兼容旧字段：Runtime 为空时生效。
+	// 新代码请用 Runtime。
 	RuncPath string
 	// Policy 运行策略（规矩）；为空时使用 config.Default() 内置策略。
 	Policy *config.Policy
@@ -70,7 +75,7 @@ type Options struct {
 	// Timing 为 true 时向 Stderr 打印启动各阶段耗时（启动开销实验用；默认关闭）。
 	Timing bool
 	// T0NS 是 --timing 的起点（CLOCK_MONOTONIC 纳秒，由调用方在参数解析后取）。
-	// 非 0 时注入容器环境变量 ANOLIX_T0_NS，供 payload 自报“启动到第一条指令”的耗时。
+	// 非 0 时注入容器环境变量 ANOLIX_T0_NS，供 payload 自报“启动到 main 首条语句”的耗时。
 	T0NS int64
 	// MinimalRootfs 为 true 时把容器功能范围削到与 zygote 路径一致：
 	// 只挂 /proc 与 /dev，不掩蔽、不重挂只读。
@@ -97,18 +102,18 @@ func MonotonicNS() int64 {
 type Launcher struct {
 	opts      Options
 	policy    *config.Policy
-	runc      string // runc 可执行文件的绝对路径（New 时用 LookPath 找到的）
-	id        string // 容器 ID
-	bundle    string // 实际使用的 bundle 目录（Run 时才确定，所以 New 后是空的）
-	bundleTmp bool   // bundle 是不是"我们自动建的临时目录"（决定退出时删不删它）
-	rootfs    string // 写进说明书的 root 路径（Run 时才确定）
-	rootless  bool   // 是否非 root 运行（是的话要开 user namespace）
+	runtime   *Runtime // 启动层选定的 OCI 运行时（runc / crun）
+	id        string   // 容器 ID
+	bundle    string   // 实际使用的 bundle 目录（Run 时才确定，所以 New 后是空的）
+	bundleTmp bool     // bundle 是不是"我们自动建的临时目录"（决定退出时删不删它）
+	rootfs    string   // 写进说明书的 root 路径（Run 时才确定）
+	rootless  bool     // 是否非 root 运行（是的话要开 user namespace）
 }
 
-// New 校验参数并构造 Launcher：解析 policy、定位 runc、生成容器 ID。
+// New 校验参数并构造 Launcher：解析 policy、解析运行时、生成容器 ID。
 //
 // 它按四步做：① 命令必须给 ② policy 必须合法（错在启动前，比错在半路好查）
-// ③ 找到 runc 这个程序并记住它的绝对路径 ④ 起好容器 ID 并接好标准流
+// ③ 解析启动层运行时并记住它的绝对路径 ④ 起好容器 ID 并接好标准流
 func New(opts Options) (*Launcher, error) {
 	if len(opts.Command) == 0 {
 		return nil, errors.New("必须指定容器内执行的命令")
@@ -123,14 +128,15 @@ func New(opts Options) (*Launcher, error) {
 		return nil, fmt.Errorf("policy 非法: %w", err)
 	}
 
-	// ③ 找 runc：LookPath = "在 PATH 列出的那些目录里找有没有这个程序"。
-	runcPath := opts.RuncPath
-	if runcPath == "" {
-		runcPath = "runc"
+	// ③ 选启动层：Runtime 优先，RuncPath 作为兼容旧字段。
+	//    ResolveRuntime 既接受名字（runc / crun），也接受可执行文件路径。
+	runtimeSpec := opts.Runtime
+	if runtimeSpec == "" {
+		runtimeSpec = opts.RuncPath
 	}
-	resolved, err := exec.LookPath(runcPath)
+	rt, err := ResolveRuntime(runtimeSpec)
 	if err != nil {
-		return nil, fmt.Errorf("未找到 runc 可执行文件 (%s): %w", runcPath, err)
+		return nil, err
 	}
 
 	// ④ 容器 ID：没给就随机生成一个，避免与别人的容器重名。
@@ -162,7 +168,7 @@ func New(opts Options) (*Launcher, error) {
 	return &Launcher{
 		opts:     opts,
 		policy:   policy,
-		runc:     resolved,
+		runtime:  rt,
 		id:       id,
 		rootless: os.Geteuid() != 0,
 	}, nil
@@ -181,9 +187,9 @@ func (l *Launcher) BundleDir() string {
 	return l.opts.BundleDir
 }
 
-// stateDir 返回传给 runc --root 的"记账本"目录，优先级：
+// stateDir 返回传给运行时 --root 的"记账本"目录，优先级：
 // ① 用户显式指定 → 用它；② rootless → 给个当前用户可写的位置；
-// ③ rootful → 返回空串，让 runc 用自己的默认位置（/run/runc）。
+// ③ rootful → 返回空串，让运行时用自己的默认位置（runc:/run/runc、crun:/run/crun）。
 func (l *Launcher) stateDir() string {
 	if l.opts.StateDir != "" {
 		return l.opts.StateDir
@@ -199,9 +205,9 @@ func (l *Launcher) stateDir() string {
 // 没设置就退到系统临时目录（带上了自身 uid 避免多用户打架）。
 func defaultRootlessStateDir() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "anolix-runc")
+		return filepath.Join(dir, "anolix-runtime")
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("anolix-runc-%d", os.Geteuid()))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("anolix-runtime-%d", os.Geteuid()))
 }
 
 // BuildRuncArgs 组装 `runc run` 的启动参数：
@@ -210,13 +216,11 @@ func defaultRootlessStateDir() string {
 //
 // 白话：拼出来的就是你在终端里手敲的那一串命令；
 // 03 篇 trace 第 760 行的 execve("/usr/sbin/runc", [...]) 就是它被执行的一瞬间。
+//
+// Deprecated: 新代码请用 (*Runtime).RunArgs —— 它同时覆盖 runc 与 crun。
+// 保留本函数只为兼容已有调用方与测试。
 func BuildRuncArgs(stateDir, bundleDir, id string) []string {
-	args := make([]string, 0, 6)
-	if stateDir != "" {
-		args = append(args, "--root", stateDir)
-	}
-	args = append(args, "run", "--bundle", bundleDir, id)
-	return args
+	return (&Runtime{kind: RuntimeRunc, path: string(RuntimeRunc)}).RunArgs(stateDir, bundleDir, id)
 }
 
 // Run 准备 OCI bundle、拉起容器执行命令并等待其退出。
@@ -255,13 +259,13 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 		}
 	}
 
-	// 第 5 步：喊 runc——anolix 不内嵌 runc，而是“喊”它起来干活。
+	// 第 5 步：喊运行时——anolix 不内嵌运行时，而是“喊”它起来干活。
 	//   为什么：这是“两种集成方式”的选型落点（可替换 / 可审计 / 故障边界），
 	//   也是取消、兜底、清理这些生命周期能力成立的前提。
-	cmd := exec.CommandContext(ctx, l.runc, BuildRuncArgs(stateDir, l.bundle, l.id)...)
+	cmd := exec.CommandContext(ctx, l.runtime.Path(), l.runtime.RunArgs(stateDir, l.bundle, l.id)...)
 	// 把容器里程序的输入输出，直接接到我们自己的终端上。
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = l.opts.Stdin, l.opts.Stdout, l.opts.Stderr
-	// 取消时先发 SIGTERM（runc 会转发给容器进程，让它优雅退出）；
+	// 取消时先发 SIGTERM（运行时会转发给容器进程，让它优雅退出）；
 	// 若其未在 killWaitDelay 内退出，exec 会兜底强杀。
 	// 取消语义两层：容器树的杀灭靠“杀 init → 内核清空 PID namespace”，而入口必须可靠。
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
@@ -278,8 +282,8 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 	// 第 7 步：等它退出，并解析退出码。
 	code, waitErr := waitExitCode(cmd)
 	if l.opts.Timing {
-		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ② runc 全程（拉起→容器退出）: %v\n",
-			time.Since(t1).Round(100*time.Microsecond))
+		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ② %s 全程（拉起→容器退出）: %v\n",
+			l.runtime.Name(), time.Since(t1).Round(100*time.Microsecond))
 	}
 	// 退出码语义：被取消且拿不到容器的码时，自己填 128+SIGKILL=137。
 	//   137 会与“内核 OOM”撞值——判据靠文案与 dmesg（02 篇、笔记 04）。
@@ -338,7 +342,7 @@ func (l *Launcher) prepareBundle() error {
 	}
 
 	// 把 policy + 命令 + rootfs 翻译成说明书结构体，再序列化成 JSON。
-	// 计时：把起点带进容器，供 payload（如 /tprobe）自报“从父进程入口到第一条指令”的耗时；
+	// 计时：把起点带进容器，供 payload（如 /tprobe）自报“从父进程入口到 main 首条语句”的耗时；
 	// 同时带一个 run id，让 payload 的 PAYLOAD_META 在并发/多次运行时能对回本次容器。
 	// 复制一份 env 再 append，不要改到调用方传进来的切片。
 	env := l.opts.Env
@@ -348,6 +352,9 @@ func (l *Launcher) prepareBundle() error {
 			"ANOLIX_RUN_ID="+l.opts.ContainerID)
 	}
 	spec := buildSpec(l.policy, l.opts.Command, env, l.rootfs, l.rootless)
+	// 启动层适配：不同运行时接受的 ociVersion 上限不同（crun 1.14 只到 1.1.0）。
+	// spec 的内容由策略决定，这里只盖一个该运行时认识的版本号。
+	spec.Version = l.runtime.SpecVersion()
 	// --minimal-rootfs：把 runc 侧的功能范围削到与 zygote 一致。
 	// 默认 spec 带 11 条掩蔽 + 6 条只读重挂 + 6 项基础挂载；这里只留 /proc 与 /dev。
 	// ⚠️ 削完之后跑的不是“默认 runc”，结论里必须标清楚是哪一种。
@@ -418,17 +425,13 @@ func (l *Launcher) cleanupBundle() {
 //
 // “先杀后删”的原因：delete --force 走 cgroup 的 kill 路径，
 // 这也解释了“cgroup 含活进程时 rmdir 报 EBUSY”那个坑。
-// 白话：就是再喊一声 runc delete --force <ID>；失败也不报（尽力而为）。
+// 白话：就是再喊一声 <runtime> delete --force <ID>；失败也不报（尽力而为）。
 func (l *Launcher) forceDeleteContainer() {
-	args := make([]string, 0, 4)
-	if dir := l.stateDir(); dir != "" {
-		args = append(args, "--root", dir)
-	}
-	args = append(args, "delete", "--force", l.id)
+	args := l.runtime.DeleteArgs(l.stateDir(), l.id)
 
 	ctx, cancel := context.WithTimeout(context.Background(), killWaitDelay)
 	defer cancel()
-	_ = exec.CommandContext(ctx, l.runc, args...).Run()
+	_ = exec.CommandContext(ctx, l.runtime.Path(), args...).Run()
 }
 
 // waitExitCode 等待命令退出，并把结果翻译成退出码。三种情形：

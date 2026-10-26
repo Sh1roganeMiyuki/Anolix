@@ -1,15 +1,17 @@
 # Anolix
 
-轻量沙箱运行时核心：Go 实现，基于 [runc](https://github.com/opencontainers/runc) 拉起 OCI 容器执行命令。
+轻量沙箱运行时核心：Go 实现，把策略翻译成 OCI 配置，交给 runc / crun 拉起容器执行命令。
 
 - **config**：解析 policy JSON 配置（seccomp 开关、errnoRet、默认动作、放行名单），严格解析 + 取值校验。
-- **launcher**：按策略组装 runc 启动参数、生成 OCI bundle（config.json + rootfs）、拉起容器并透传退出码。
+- **launcher**：把策略翻译成 OCI bundle（config.json + rootfs），交给启动层执行并透传退出码。
+  - 分层：策略层（config）→ 翻译层（spec.go）→ 启动层（runtime.go：runc / crun）→ 生命周期（launcher.go）。
+  - 换运行时只换“谁来执行同一份 config.json”，策略与 spec 内容不变。
 
 ## 快速开始
 
 ### 前置要求
 
-- Linux，且已安装 runc 并在 PATH 中（`runc --version`，已在 runc 1.3.4 上验证）
+- Linux，且已安装 runc 并在 PATH 中（`runc --version`，已在 runc 1.3.4 上验证）；crun 为可选后端（已在 crun 1.14.1 上验证）
 - Go 1.27+（`go version`）
 - 非 root 运行时自动启用 rootless（内核需支持 user namespace）；使用 `sudo` 运行时为完整 root 隔离
 
@@ -45,6 +47,20 @@ go build -o anolix ./cmd/anolix
 # 演示超时终止（Ctrl+C 中断同理）
 ./anolix run --timeout 5s --rootfs ./rootfs -- /probe hold 60
 ```
+
+### 4. 换运行时：crun（可选）
+
+```bash
+./scripts/deploy-crun.sh              # 系统已装则直接用；非 root 自动解包到 .tools/
+./anolix run --runtime ./bin/crun --rootfs ./rootfs -- /probe
+
+# 系统安装形态（无包装层，做启动性能测量时用这个）
+sudo ./scripts/deploy-crun.sh --system
+./anolix run --runtime crun --rootfs ./rootfs -- /probe
+```
+
+crun 1.14 只接受 `ociVersion ≤ 1.1.0`；启动层会按运行时改写版本号，
+spec 的其余字段与 runc 完全一致（见 [`launcher/runtime.go`](launcher/runtime.go)）。
 
 ## policy 配置
 
@@ -91,18 +107,19 @@ anolix run [flags] -- <command> [args...]
 | `--policy PATH` | policy JSON 文件路径；缺省使用内置策略 |
 | `--rootfs PATH` | 容器根文件系统目录；缺省使用空 rootfs |
 | `--bundle PATH` | OCI bundle 目录；缺省使用临时目录并自动清理 |
-| `--state-dir PATH` | runc `--root` 状态目录；缺省使用 runc 默认值 |
+| `--state-dir PATH` | 运行时 `--root` 状态目录；缺省使用运行时默认值 |
 | `--id NAME` | 容器 ID；缺省自动生成（`anolix-<hex>`） |
-| `--runc PATH` | runc 可执行文件路径；缺省在 PATH 中查找 |
+| `--runtime NAME` | 启动层运行时：`runc`（缺省）/ `crun` / 可执行文件路径 |
+| `--runc PATH` | 兼容旧参数；等价于 `--runtime PATH`（已弃用） |
 | `--timeout DUR` | 容器运行超时（如 `30s`）；0 表示不限 |
 | `--keep-bundle` | 退出后保留 bundle 目录（调试用） |
 
 ## 行为说明
 
 - **退出码**：容器进程退出码原样返回；因信号终止时为 `128+signal`。
-- **超时 / Ctrl+C**：先向 runc 发 SIGTERM（由 runc 转发给容器进程优雅退出），兜底强杀并执行 `runc delete --force` 清理。
+- **超时 / Ctrl+C**：先向运行时发 SIGTERM（由它转发给容器进程优雅退出），兜底强杀并执行 `<runtime> delete --force` 清理。
 - **清理**：临时 bundle 退出后自动删除；显式指定 `--bundle` 或 `--keep-bundle` 时保留。
-- **rootless**：非 root 运行时自动追加 user namespace 与 uid/gid 映射（容器 root → 当前用户），runc 状态目录自动使用用户可写位置（`$XDG_RUNTIME_DIR` 或临时目录）。
+- **rootless**：非 root 运行时自动追加 user namespace 与 uid/gid 映射（容器 root → 当前用户），运行时状态目录自动使用用户可写位置（`$XDG_RUNTIME_DIR/anolix-runtime` 或临时目录）。
 - **沙箱基线**：独立 pid/network/ipc/uts/mount/cgroup namespace；能力集清空、`NoNewPrivileges`、仅放行标准设备、掩蔽 `/proc/kcore` 等敏感路径。
 - **rootfs**：解析为规范化的绝对路径后写入 config.json（runc 要求 rootfs 不得含符号链接组件）；`--rootfs` 指向符号链接时自动解析到真实目录。
 
@@ -114,8 +131,10 @@ anolix run [flags] -- <command> [args...]
 ├── config/           # policy 解析与校验
 ├── launcher/
 │   ├── spec.go       # 由 policy 生成 OCI runtime spec（含 seccomp 映射）
-│   └── launcher.go   # bundle 构建、runc 参数组装、容器生命周期
+│   ├── runtime.go    # 启动层接缝：解析 runc / crun，组装启动与清理参数
+│   └── launcher.go   # bundle 构建、运行时参数组装、容器生命周期
 ├── scripts/mkrootfs.sh  # 一键构建最小 rootfs
+├── scripts/deploy-crun.sh  # 部署 crun（系统安装或仓库内解包）
 └── examples/policy.json
 ```
 
