@@ -165,6 +165,22 @@ func TestBuildSeccompDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildSeccompErrnoRetOnlyForSupportedAction(t *testing.T) {
+	// ERRNO（盖章）：动作会留下返回值，errno 必须有地方落脚，字段要写。
+	sc := buildSeccomp(config.Seccomp{Enabled: true, ErrnoRet: 1145, DefaultAction: config.ActionErrno})
+	if sc.DefaultErrnoRet == nil || *sc.DefaultErrnoRet != 1145 {
+		t.Fatalf("ERRNO 动作应写 DefaultErrnoRet=1145，实际 %v", sc.DefaultErrnoRet)
+	}
+	// KILL / KILL_PROCESS / TRAP：进程直接被处理掉，没有返回值，字段必须不写。
+	// 写了会被 crun 判为非法、整份 config.json 拒收（runc 则静默忽略）——两种都不对。
+	for _, action := range []string{config.ActionKill, config.ActionKillProcess, config.ActionTrap} {
+		sc := buildSeccomp(config.Seccomp{Enabled: true, ErrnoRet: 1145, DefaultAction: action})
+		if sc.DefaultErrnoRet != nil {
+			t.Errorf("%s 不支持 errno，不应写 DefaultErrnoRet，实际 %d", action, *sc.DefaultErrnoRet)
+		}
+	}
+}
+
 func TestBuildSeccompDisabled(t *testing.T) {
 	if sc := buildSeccomp(config.Seccomp{Enabled: false}); sc != nil {
 		t.Errorf("关闭 seccomp 时 buildSeccomp 应返回 nil, 实际 %+v", sc)

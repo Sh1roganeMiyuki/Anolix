@@ -41,6 +41,10 @@ const (
 	ActionKill        = "SCMP_ACT_KILL"
 	ActionKillProcess = "SCMP_ACT_KILL_PROCESS"
 	ActionTrap        = "SCMP_ACT_TRAP"
+
+	// actionTrace 不在上面的可选集里（policy 暂不支持 SCMP_ACT_TRACE），
+	// 但规范把它列为"支持 errno"的动作之一，判据里必须认它。
+	actionTrace = "SCMP_ACT_TRACE"
 )
 
 // 三条事实：名字精确匹配 / 未知名静默忽略 / fork-vfork-open 是后补的。
@@ -194,7 +198,8 @@ func Parse(r io.Reader) (*Policy, error) {
 }
 
 // Validate 校验策略取值是否合法。
-// 白话：这里只做"启动前能查出来的错"——动作名、errno 范围、名单条目形态，
+// 白话：这里只做"启动前能查出来的错"——动作名、errno 范围、
+// errno 与动作的搭配（见 ActionSupportsErrno）、名单条目形态，
 // 以及资源的范围与组合（见 Resources.Validate）。
 func (p *Policy) Validate() error {
 	s := &p.Seccomp
@@ -207,6 +212,16 @@ func (p *Policy) Validate() error {
 	if s.ErrnoRet > maxErrno {
 		// errno 允许 0–4095；超过就不是 seccomp 能表达的编号了。
 		return fmt.Errorf("seccomp errnoRet %d 超出合法范围 (0-%d)", s.ErrnoRet, maxErrno)
+	}
+	// errnoRet 只在动作"会返回值"时才有意义（见 ActionSupportsErrno）。
+	// 这里只拦"用户显式配了"的情况：ErrnoRet==0 表示他压根没提过，
+	// 翻译层不写这个字段就行（见 launcher.buildSeccomp），不必报错——
+	// 那是我们自己补的默认值，不该让用户替它背锅。
+	if s.Enabled && s.ErrnoRet != 0 {
+		if action := s.EffectiveDefaultAction(); !ActionSupportsErrno(action) {
+			return fmt.Errorf("seccomp errnoRet=%d 与动作 %q 不兼容：该动作不给返回值，没有地方盖章；"+
+				"请改用 %s，或删掉 errnoRet", s.ErrnoRet, action, ActionErrno)
+		}
 	}
 	for _, name := range s.AllowedSyscalls {
 		// 名单条目不允许空、也不允许含空白字符——这些都是"写错了"的征兆。
@@ -285,6 +300,29 @@ func (r Resources) EffectiveCPUPeriodMicros() uint64 {
 		return DefaultCPUPeriodMicros
 	}
 	return r.CPUPeriodMicros
+}
+
+// ActionSupportsErrno 判断某个动作是否接受 errnoRet。
+//
+// 规范原文（runtime-spec config-linux.md）：
+//
+//	Some actions like SCMP_ACT_ERRNO and SCMP_ACT_TRACE allow to specify
+//	the errno code to return. When the action doesn't support an errno,
+//	the runtime MUST print an error and fail.
+//
+// 白话：动作决定"怎么拦"，errnoRet 只是"盖章时写哪个编号"。
+// 只有会留下返回值的动作（盖章 ERRNO、追踪 TRACE）才有地方写这个编号；
+// KILL / KILL_PROCESS / TRAP 直接把进程处理掉，写进去就是自相矛盾的字段。
+//
+// 实测差异：在 KILL_PROCESS 下写 defaultErrnoRet，crun 会拒绝整份 config.json
+// （"errno value specified for action ..."），runc 则静默忽略——两种都不对。
+func ActionSupportsErrno(action string) bool {
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case ActionErrno, actionTrace:
+		return true
+	default:
+		return false
+	}
 }
 
 // validAction 判断动作名是否属于四个支持值之一。

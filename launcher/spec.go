@@ -133,12 +133,10 @@ func buildSeccomp(s config.Seccomp) *specs.LinuxSeccomp {
 		// 开关关掉了：不装安检机。
 		return nil
 	}
-	errnoRet := s.EffectiveErrnoRet()
-	return &specs.LinuxSeccomp{
+	action := s.EffectiveDefaultAction()
+	sc := &specs.LinuxSeccomp{
 		// 没被名单放行的调用，按什么方式处理（默认 ERRNO = 盖章拒绝）。
-		DefaultAction: specs.LinuxSeccompAction(s.EffectiveDefaultAction()),
-		// 盖章时回哪个 errno 编号。用指针是因为 OCI 允许这个字段"不写"。
-		DefaultErrnoRet: &errnoRet,
+		DefaultAction: specs.LinuxSeccompAction(action),
 		// 一条放行规则：名单里的名字 + 动作 ALLOW（放行）。
 		Syscalls: []specs.LinuxSyscall{
 			{
@@ -147,6 +145,17 @@ func buildSeccomp(s config.Seccomp) *specs.LinuxSeccomp {
 			},
 		},
 	}
+	// 只在动作支持 errno 时才写这一字段（见 config.ActionSupportsErrno）。
+	//
+	// 不是“把默认值填上”那么简单：OCI 里这是 OPTIONAL 字段，
+	// 它的“存在”本身就携带信息（写了 = 我指定；不写 = 用运行时默认）。
+	// 在 KILL / KILL_PROCESS / TRAP 下写它，crun 会拒绝整份说明书，
+	// runc 则静默忽略——两种都不是用户想要的。
+	if config.ActionSupportsErrno(action) {
+		errnoRet := s.EffectiveErrnoRet()
+		sc.DefaultErrnoRet = &errnoRet
+	}
+	return sc
 }
 
 // 资源围栏的翻译点：policy 数字 → OCI 字段 →（runc 写入）内核文件。

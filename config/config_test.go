@@ -99,6 +99,16 @@ func TestValidate(t *testing.T) {
 		{"未知动作", `{"seccomp": {"enabled": true, "defaultAction": "SCMP_ACT_TRACE"}}`, true},
 		{"errnoRet 上界合法值", `{"seccomp": {"enabled": true, "errnoRet": 4095}}`, false},
 		{"errnoRet 越界", `{"seccomp": {"enabled": true, "errnoRet": 4096}}`, true},
+		// errnoRet 与动作的搭配：只有 ERRNO（以及 policy 尚不支持的 TRACE）
+		// 会留下返回值，其余动作下写 errnoRet 是自相矛盾的。
+		{"errnoRet + ERRNO", `{"seccomp": {"enabled": true, "errnoRet": 1145, "defaultAction": "SCMP_ACT_ERRNO"}}`, false},
+		{"errnoRet + KILL", `{"seccomp": {"enabled": true, "errnoRet": 1145, "defaultAction": "SCMP_ACT_KILL"}}`, true},
+		{"errnoRet + KILL_PROCESS", `{"seccomp": {"enabled": true, "errnoRet": 1145, "defaultAction": "SCMP_ACT_KILL_PROCESS"}}`, true},
+		{"errnoRet + TRAP", `{"seccomp": {"enabled": true, "errnoRet": 1145, "defaultAction": "SCMP_ACT_TRAP"}}`, true},
+		// 没显式配 errnoRet = 用户没提过，不该报错（翻译层不写即可）。
+		{"未配置 errnoRet + KILL_PROCESS", `{"seccomp": {"enabled": true, "defaultAction": "SCMP_ACT_KILL_PROCESS"}}`, false},
+		// seccomp 关着时 errnoRet 不会进说明书，不参与搭配校验。
+		{"seccomp 关闭 + errnoRet", `{"seccomp": {"enabled": false, "errnoRet": 1145, "defaultAction": "SCMP_ACT_KILL_PROCESS"}}`, false},
 		{"放行名单含空条目", `{"seccomp": {"enabled": true, "allowedSyscalls": ["read", ""]}}`, true},
 		{"放行名单含空白", `{"seccomp": {"enabled": true, "allowedSyscalls": ["read file"]}}`, true},
 		{"资源围栏合法", `{"resources": {"memoryLimitBytes": 67108864, "pidsLimit": 20, "cpuQuotaMicros": 20000, "cpuPeriodMicros": 100000}}`, false},
@@ -122,6 +132,26 @@ func TestValidate(t *testing.T) {
 				t.Errorf("期望通过 实际报错: %v", err)
 			}
 		})
+	}
+}
+
+func TestActionSupportsErrno(t *testing.T) {
+	cases := []struct {
+		action string
+		want   bool
+	}{
+		{ActionErrno, true},
+		{" scmp_act_errno ", true},
+		{"SCMP_ACT_TRACE", true}, // policy 暂不支持，但规范上它支持 errno
+		{ActionKill, false},
+		{ActionKillProcess, false},
+		{ActionTrap, false},
+		{"SCMP_ACT_ALLOW", false},
+	}
+	for _, tc := range cases {
+		if got := ActionSupportsErrno(tc.action); got != tc.want {
+			t.Errorf("ActionSupportsErrno(%q) = %v, 期望 %v", tc.action, got, tc.want)
+		}
 	}
 }
 
