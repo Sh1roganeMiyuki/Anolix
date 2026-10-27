@@ -20,7 +20,7 @@
 
 > **crun 也是 OCI 运行时，而且比 runc 轻。zygote 的 3.4× 是赢 runc 的架构，还是赢所有运行时？**
 
-如果 crun 也接近 zygote，那 3.4× 的叙事要打折；如果 crun 明显慢于 zygote，那“一次 clone 一跳”才真正立住。
+如果 crun 也接近 zygote，那 3.4× 的叙事要打折；如果 crun 明显慢于 zygote，那“无运行时参与、一次 clone 出生”才真正立住。
 两种情况都是好结论，但**必须先有 root 口径的数**。
 
 ---
@@ -165,15 +165,35 @@ crun 把 runc 的启动时间砍掉约一半（2.1×），但相对 zygote 仍�
 对“zygote 赢的是 runc 的架构，还是所有运行时”这个问题，答案是：
 
 > **赢 runc 约 3.4×，赢 crun 约 1.6×。**
-> crun 证明了“轻量 OCI 运行时”能缩差距，但没有抹平“一次 clone 出生 + 薄 init”的优势。
+> crun 证明了“轻量 OCI 运行时”能缩差距，但没有抹平“无运行时参与 + 一次 clone 出生 + 薄 init”的优势。
 
-crun 为什么比 runc 快 2 倍？本轮只测到总时长，**没有做段归因**。候选（⚠️ 都是假设）：
+### 为什么 crun 比 runc 快 2 倍（strace 实测）
 
-- runc 自身要 re-exec 一份 `runc init`（runc 主进程 + runc init，两次 Go 启动）；crun 是 C，没有这一层；
-- runc 二进制约 11 MB，crun 约 0.4 MB，page-in 不同；
-- 两者 cgroup/device 的落地路径不同。
+同一命令、同 rootfs、只换 `--runtime`，抓 `clone / clone3 / execve`（rootless）：
 
-要坐实，需要 `strace -c -f` 或 ftrace 把 6 ms 拆开；本文不下这个结论。
+```text
+runc
+  execve(runc)                                      runc 主进程（Go）
+    clone(CLONE_VFORK) → execve(/proc/self/fd/6, ["runc","init"])
+                                                      ↑ re-exec：Go runtime 第 2 次加载
+      clone(CLONE_PARENT) → clone(CLONE_PARENT) → execve("/tprobe")
+                                                      ↑ double fork
+
+crun
+  execve(crun)                                      crun 主进程（C）
+    clone(CLONE_NEWUSER)                            userns 载体
+    clone → execve(newgidmap) ×6（全 ENOENT）       写 gid_map 的辅助程序
+    clone → execve(newuidmap) ×6（全 ENOENT）       写 uid_map 的辅助程序
+    clone → execve(payload)                        setup 在同一份 C 代码里做完
+```
+
+一句话：**进程数不是原因**（runc 内部 3 次、crun 4 次，crun 更多却更快），
+**runtime 加载次数才是**（2 次 vs 1 次）；根因是语言——Go 的 fork 后在子进程里不能继续跑 Go，
+只能在 C 层做完 ns 设置再 execve 回自己；crun 是 C，fork 出的子进程可以直接继续 setup。
+
+仍未拆开：crun 那 6.5 ms 内部怎么分配，以及 zygote 比 crun 少的 2.5 ms 具体来自哪一项。
+这段证据的完整推导（包括 clone 只占 zygote 自身 12%）见
+[10 篇](10_一次归因翻车：3.4×不是少一次clone.md)。
 
 ### 3. 一次翻车记录：三路径交错把 runc 抬到 30–36 ms
 
@@ -193,8 +213,20 @@ crun 为什么比 runc 快 2 倍？本轮只测到总时长，**没有做段归�
 
 表面看：runc 30–36 ms，zygote 3.6–4.1 ms，“8–10×”。
 但同一份 runc 二进制，**不起母体单测只有 11.4 / 13.6 ms**，rootless 也只有 16–18 ms。
-runc 的样本分布是宽尾的：min 11–13，p10≈14–20，p50≈30–36，max 51–61；
-crun/zygote 同时段一直很紧。**只有 runc 被抬高，说明是测量环境的问题，不是 runc 变慢。**
+runc 的样本不是"宽尾"，是**双峰**。完整档 30 个样本按采集顺序：
+
+```text
+30.2 28.7 33.7 52.0 24.0 38.6 35.6 31.2 40.7 31.0 44.9 40.4 39.4 39.9 45.1
+30.3 24.5 37.6 [14.4] 37.0 35.7 39.2 36.6 [13.3] 34.7 37.3 [13.1] 40.5 21.9 48.9
+```
+
+30 个里只有 3 个落回 13–14 ms —— 和"只跑 runc"那组（13.0–15.0）完全重合；
+其余 27 个在 22–52 ms。crun / zygote 同时段一直很紧。
+
+这个形状比"p50 被抬高"更有信息量：
+
+- 如果是**持续的锁竞争**，母体每样本都在动、runc 每样本都要撞 → 应该整体右移，min 也会上去；
+- 但 min 仍是 11–13，说明那几次**完全没撞上** → 指向**偶发事件**，不是持续争用。
 
 隔离实验把因果钉住：
 
@@ -204,12 +236,24 @@ crun/zygote 同时段一直很紧。**只有 runc 被抬高，说明是测量环
 干净块（runc+crun，无母体）：runc 12.46 / 13.66
 ```
 
-机制候选（⚠️ 未分离）：
+机制候选（⚠️ 未分离，按证据强度排序）：
 
-- 母体每样本 `mkdir/rmdir` 一个 `anolix-<id>` 叶子 cgroup；
-- worker-init 在挂载 ns 里 `MS_PRIVATE → bind → pivot_root → umount → mount`；
-- runc rootful 也走 cgroup + mount；两边的锁（`cgroup_mutex` / `namespace_sem`）可能相撞；
-- crun 的 cgroup/mount 路径可能不同，因此没有表现出同样的敏感（⚠️ 未验证）。
+1. **page cache 被逐出**（最符合双峰形状）。runc 二进制约 11 MB，crun 约 0.4 MB；
+   母体 + worker 每样本都在分配内存，若回收把 runc 的页扫出缓存，
+   则每次启动都要重新 page-in → 解释"固定的一次等待"和"只有 runc 受害"。
+   ⚠️ **反证**：zygote 的 worker-init 也有 3.0 MB，交错里同样每轮跑，却没被抬高
+   （3.6–4.1 ms 稳定）。所以要么存在"只有 11 MB 这个量级才会被逐出"的阈值，
+   要么这个假设不成立——需要 major page fault 数据才能判。
+2. **cgroup 锁竞争**（`cgroup_mutex`）：母体每样本 `mkdir/rmdir` 叶子 cgroup，
+   runc rootful 也走 cgroup；但持续竞争应导致整体右移，与双峰不完全吻合。
+3. **mount ns 锁竞争**（`namespace_sem`）：同上，也无法单独解释双峰。
+4. crun 的 cgroup/mount 路径不同，因此没表现出同样的敏感（⚠️ 未验证）。
+
+判别实验（未做，按成本排序）：
+
+- 起一个**带 `--cgroup` 但空闲**的母体，再测 runc → 区分"常驻占资源"还是"每样本动作"；
+- 起一个**不带 `--cgroup`** 的母体 → 排除 cgroup 锁；
+- 对比单测与交错两组 runc 的 major page fault（`/usr/bin/time -v`）→ 直指 page cache 假设。
 
 为什么 07 没踩到？07 的 `ab.sh` 是**先把 runc 整块跑完，再跑 zygote**；母体虽然起着，但**空闲**。
 本文一开始把成对交替直接套到三路径上，忘了母体不是无副作用的旁观者——它每样本都在动共享内核资源。
@@ -352,8 +396,8 @@ go test ./config/... ./launcher/... -count=1
 
 | # | 项 | 目的 | 怎么开始 |
 | --- | --- | --- | --- |
-| 1 | **分离母体干扰** | 把“cgroup 锁”与“mount ns 锁”分开 | 起一个**空闲**母体再测 runc；再起一个**不带 `--cgroup`** 的母体测 runc |
-| 2 | **crun 的 6 ms 拆段** | crun 目前是黑盒；zygote 能拆 8 站 | `strace -c -f` 数 syscall 分布；或用 `crun --debug` 看阶段 |
+| 1 | **验证双峰的来源** | 区分 page cache 逐出 / cgroup 锁 / mount ns 锁 | 三个判别实验已写在分析末尾（空闲母体 / 无 --cgroup 母体 / 比较 major page fault），按成本排序 |
+| 2 | **crun 的 6 ms 内部时间分配** | 结构已清楚（1 次 runtime 加载），未知的是内部怎么分 | `strace -c -f` 数 syscall 分布；或用 `crun --debug` 看阶段 |
 | 3 | **zygote 最小档对齐 seccomp** | 让最小档真正同工作量 | 给 `worker-init` 加 `--no-seccomp`（只在测量时用） |
 
 ---
