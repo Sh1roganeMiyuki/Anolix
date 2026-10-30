@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"anolix/config"
@@ -29,6 +30,13 @@ import (
 )
 
 func main() {
+	// 把 goroutine 钉在当前 OS 线程上：seccomp filter 是 per-thread 的
+	// （prctl(PR_SET_SECCOMP) 只作用于 current），而 Go 调度器可能在安全点把
+	// goroutine 挪到别的 M 上——一旦挪走，后面 syscall.Exec 就在一条没有 filter
+	// 的线程上执行，payload 会完全裸奔。runc 在同样位置也是先 LockOSThread。
+	// 故意不解锁：下一步就是 execve，整个进程会被替换。
+	runtime.LockOSThread()
+
 	// 计时第一站：到这里说明 clone + execve + Go runtime 启动已经走完。
 	// 后续每站的 ns 值都是相对母体 clone 前那一刻的 CLOCK_MONOTONIC。
 	zygote.Mark("init_start")

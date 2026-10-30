@@ -177,7 +177,12 @@ func BuildAllowlistFilter(numbers []uint32, errno uint32) []sockFilter {
 	return prog
 }
 
-// InstallSeccomp 把 names 翻成号码、构造过滤器、装到「当前进程」身上。
+// InstallSeccomp 把 names 翻成号码、构造过滤器、装到「当前线程」身上。
+//
+// ⚠️ 作用单位是 task，不是进程：prctl(PR_SET_SECCOMP) 只对 current 生效。
+// 新线程 clone 时会继承父线程的 filter，但已存在的其他线程不受影响；
+// prctl 接口又没有 TSYNC 可用来批量同步。所以调用方必须保证：
+// 装完之后的 execve 发生在同一个线程上（worker-init 用 LockOSThread 钉死）。
 //
 // 返回实际放行的 syscall 条数。未识别的名字会被跳过并计入 unknown（#19 坑2：
 // 拼错的名字静默忽略 = 等于没写，所以这里把 unknown 回吐给调用方打印/告警）。
