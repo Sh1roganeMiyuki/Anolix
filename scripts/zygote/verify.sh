@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zygote 机制验证：./verify.sh <ns|memfd|cgroup|seccomp|all>
+# zygote 机制验证：./verify.sh <ns|memfd|cgroup|seccomp|caps|all>
 #
 # 前置：先 ./build.sh && ./mother.sh up
 # 每个子命令 = 一条"探针"，spawn 一个 worker 然后从宿主侧验它该验的东西。
@@ -78,11 +78,59 @@ t_seccomp() {
   echo "  期望：A 的 sethostname→EPERM ✅（被盖章）；B 的 sethostname→成功 ❌（没拦）"
 }
 
+# 在 rootfs 里跑一条 busybox applet，回吐本次新增的日志行。
+# ⚠️ 不能用 `sh -c '...'`：rootfs 的 /bin 下只有 busybox 和 sh 两个文件，
+#    shell 按 PATH 找 cat/ls 会全部 not found（exit 127）。必须由 busybox 直接带 applet 名跑。
+run_applet() {
+  local mode=$1; shift
+  local before; before=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+  sudo ./bin/spawn --socket "$SOCK" -- "$ROOT/bin/worker-init" $mode \
+    --rootfs "${ROOTFS:-$ROOT/rootfs}" -- /bin/busybox "$@" >/dev/null 2>&1 || true
+  sleep 0.4
+  tail -n "+$((before+1))" "$LOG"
+}
+
+t_caps() {
+  echo "=== 能力收敛（payload 应为零能力；--harden 不应有失败项）==="
+
+  # 这 11 条是 worker-init maskedPaths 的全集。本机内核里不存在的，
+  # 根本不可能被掩蔽，也不算失败——先把“存在几条”量出来。
+  # ⚠️ 必须在 --harden 下量：plain 不挂 /sys，/sys/** 那些目标在 plain 里根本不存在。
+  local ex exist
+  ex=$(run_applet "--harden" ls -1d \
+    /proc/acpi /proc/asound /proc/kcore /proc/keys /proc/latency_stats \
+    /proc/timer_list /proc/timer_stats /proc/sched_debug /proc/scsi \
+    /sys/firmware /sys/devices/virtual/powercap)
+  exist=$(printf '%s\n' "$ex" | grep -cE '^/' || true)
+  echo "  本机存在的掩蔽目标: ${exist}/11"
+  printf '%s\n' "$ex" | grep -E '^/' | sed 's/^/    /'
+
+  local mode st mp dn n
+  for mode in "" "--harden"; do
+    echo "  [${mode:-plain}]"
+    st=$(run_applet "$mode" cat /proc/self/status)
+    mp=$(run_applet "$mode" cat /proc/mounts)
+    dn=$(run_applet "$mode" ls -l /dev/null)
+
+    echo "$st" | grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb)' | sed 's/^/    /' \
+      || echo "    (没抓到 Cap 行)"
+
+    n=$(printf '%s\n' "$mp" | awk -v mask='^/(proc/(acpi|asound|kcore|keys|latency_stats|timer_list|timer_stats|sched_debug|scsi)|sys/(firmware|devices/virtual/powercap))$' '$2 ~ mask' | wc -l)
+    echo "    掩蔽落点: ${n} 条（应等于“存在几条”）"
+    printf '%s\n' "$mp" | awk -v mask='^/(proc/(acpi|asound|kcore|keys|latency_stats|timer_list|timer_stats|sched_debug|scsi)|sys/(firmware|devices/virtual/powercap))$' \
+      '$2 ~ mask {print "      " $1 " → " $2}'
+
+    echo "    /dev/null: $(printf '%s\n' "$dn" | grep -E '^(crw|ls: )' | head -1 || echo '(无)')"
+    echo "    harden 失败行: $(printf '%s\n' "$st" | grep -c 'harden 失败' || true)"
+  done
+}
+
 case "${1:-all}" in
   ns)      t_ns ;;
   memfd)   t_memfd ;;
   cgroup)  t_cgroup ;;
   seccomp) t_seccomp ;;
+  caps)    t_caps ;;
   all)     t_ns; echo; t_memfd; echo; t_cgroup; echo; t_seccomp ;;
-  *)       echo "用法: $0 <ns|memfd|cgroup|seccomp|all>"; exit 1 ;;
+  *)       echo "用法: $0 <ns|memfd|cgroup|seccomp|caps|all>"; exit 1 ;;
 esac

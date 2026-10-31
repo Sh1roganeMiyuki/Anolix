@@ -6,7 +6,7 @@
 //	│ 维度           │ 普通沙箱 (launcher/)  │ 母体容器 (本文件)             │
 //	├────────────────┼──────────────────────┼──────────────────────────────┤
 //	│ PID namespace  │ 有（容器 init = 1 号）│ 无（母体活在宿主 PID ns）     │
-//	│ Capabilities   │ 清空                  │ CAP_SYS_ADMIN（为 worker 建 ns）│
+//	│ Capabilities   │ 清空                  │ 见下方 capMothers（worker-init 用完即卸）│
 //	│ Seccomp        │ 严格白名单            │ 关闭（母体需要全量 syscall）   │
 //	│ NoNewPrivileges│ true                  │ false（母体是受信进程）        │
 //	│ 网络           │ 隔离（无网）          │ 隔离（通过 socket 通信即可）   │
@@ -79,13 +79,14 @@ func BuildMotherSpec(cfg MotherConfig) *specs.Spec {
 				"HOSTNAME=" + cfg.Hostname,
 			},
 			Cwd: "/",
-			// 母体需要 CAP_SYS_ADMIN 来执行 unshare（为 worker 创建 namespace）。
-			// 还需要 CAP_SYS_CHROOT（如果 worker 需要 pivot_root）。
+			// 母体的能力集就是 worker-init 的能力集（clone 继承 + uid 0 的 execve 重算）。
+			// 逐项理由见 MotherCapabilities；worker-init 装完 rootfs 后会调用
+			// zygote.DropCapabilities 把它们全部卸掉，payload 一个都拿不到。
 			Capabilities: &specs.LinuxCapabilities{
-				Bounding:    []string{"CAP_SYS_ADMIN", "CAP_SYS_CHROOT", "CAP_NET_ADMIN"},
-				Effective:   []string{"CAP_SYS_ADMIN", "CAP_SYS_CHROOT", "CAP_NET_ADMIN"},
-				Inheritable: []string{"CAP_SYS_ADMIN", "CAP_SYS_CHROOT", "CAP_NET_ADMIN"},
-				Permitted:   []string{"CAP_SYS_ADMIN", "CAP_SYS_CHROOT", "CAP_NET_ADMIN"},
+				Bounding:    MotherCapabilities(),
+				Effective:   MotherCapabilities(),
+				Inheritable: MotherCapabilities(),
+				Permitted:   MotherCapabilities(),
 			},
 			// 母体是受信进程：不设 NoNewPrivileges（否则无法使用 capabilities）
 			NoNewPrivileges: false,
@@ -137,6 +138,29 @@ func BuildMotherSpec(cfg MotherConfig) *specs.Spec {
 				},
 			},
 		},
+	}
+}
+
+// MotherCapabilities 是母体（= worker-init 干活时）需要的能力集。
+//
+// 每一项都要说出用途，否则它会在 worker-init 卸掉之前一直开着：
+//
+//	CAP_SYS_ADMIN  clone 建 6 类 ns；worker-init 里的 MS_PRIVATE / bind /
+//	               pivot_root / umount / 挂 /proc、/dev
+//	CAP_MKNOD      worker-init 的 --harden 要造 /dev/null（11 条掩蔽的 bind 源）；
+//	               少了它这批掩蔽会静默失败
+//	CAP_SETPCAP    worker-init 卸能力时 PR_CAPBSET_DROP 需要它；
+//	               它自己也在这张表里——用一把钥匙拆掉整个钥匙串
+//
+// CAP_SYS_CHROOT / CAP_NET_ADMIN 当前无人使用（worker-init 用 PivotRoot 不用 chroot，
+// 全程不碰网络），保留是为了不改动母体已有行为；确认无影响后可以剪掉。
+func MotherCapabilities() []string {
+	return []string{
+		"CAP_SYS_ADMIN",
+		"CAP_SYS_CHROOT",
+		"CAP_NET_ADMIN",
+		"CAP_MKNOD",
+		"CAP_SETPCAP",
 	}
 }
 

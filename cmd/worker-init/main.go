@@ -7,10 +7,14 @@
 //
 // 顺序（很重要）：
 //
-//	mount 私有化 → bind rootfs → pivot_root → 挂 /proc → 装 seccomp → execve payload
+//	mount 私有化 → bind rootfs → pivot_root → 挂 /proc → 卸能力 → 装 seccomp → execve payload
 //
 //	rootfs 相关的 syscall（mount/pivot_root）必须在**装 seccomp 之前**做完——
 //	否则会被自己的过滤器拦（自缚）；装完过滤器后 init 只剩一条 execve。
+//
+//	卸能力必须卡在 setupRootfs() 返回之后（那之前每个 mount 都要 CAP_SYS_ADMIN），
+//	而 execve 之前要同时拆 Bounding + 清空五个集合：uid 0 在 execve 时会按
+//	Bounding 把能力重新补满（小知识点 49）。
 //
 // 用法（由母体 spawn；母体已给新 mount ns）：
 //
@@ -60,7 +64,16 @@ func main() {
 		os.Exit(2)
 	}
 
-	// 2) 装 seccomp（此时 rootfs 已就绪、payload 尚未 execve）
+	// 2) 卸能力。mount / pivot_root 都要 CAP_SYS_ADMIN，这些活已在 setupRootfs 里
+	//    干完；payload 一个能力都不需要。必须同时拆 Bounding 天花板并清空五个集合——
+	//    否则 uid 0 的 payload 会在 execve 时被内核按 Bounding 重新补满（小知识点 49）。
+	if err := zygote.DropCapabilities(); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-init: 卸能力失败: %v\n", err)
+		os.Exit(2)
+	}
+	zygote.Mark("dropcaps")
+
+	// 3) 装 seccomp（此时 rootfs 已就绪、能力已卸、payload 尚未 execve）
 	n, unknown, err := zygote.InstallSeccomp(zygote.DefaultPayloadAllowlist(), uint32(config.DefaultErrnoRet))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker-init: 装 seccomp 失败: %v\n", err)
@@ -72,7 +85,7 @@ func main() {
 		fmt.Printf("worker-init: ⚠️ 名单里 %d 条没认出来（拼错=没写）: %v\n", len(unknown), unknown)
 	}
 
-	// 3) execve payload。带个 env 告诉 payload：seccomp 已由 init 装好（别再装一遍）。
+	// 4) execve payload。带个 env 告诉 payload：seccomp 已由 init 装好（别再装一遍）。
 	zygote.Mark("execve")
 	env := append(os.Environ(), "ANOLIX_INIT_SECCOMP=1")
 	if err := syscall.Exec(payload, append([]string{payload}, extra...), env); err != nil {
@@ -207,28 +220,56 @@ var extraMounts = []struct {
 //  2. 掩蔽：用 /dev/null 盖住敏感文件
 //  3. 只读重挂：把可调参数目录重挂成只读
 //
-// 任一步失败都跳过（best-effort）——目的是对齐“做了多少事”，不是做安全产品。
+// 每项失败都继续做下一项（best-effort），但不再静默吃掉错误：失败逐条打到
+// stderr、末尾再给总数。上一版把错误吞进 `_ =`，mknod 因缺 CAP_MKNOD 失败后
+// 11 条掩蔽跟着全灭，而日志里一个字都没有——A/B 对比由此失真。
 func hardenRootfs() {
+	fail := 0
+	step := func(what string, err error) {
+		if err != nil {
+			fail++
+			fmt.Fprintf(os.Stderr, "worker-init: harden 失败 [%s]: %v\n", what, err)
+		}
+	}
+
 	for _, m := range extraMounts {
-		_ = os.MkdirAll(m.dest, 0755)
-		_ = syscall.Mount(m.source, m.dest, m.fstype, m.flags, m.data)
+		step("mkdir "+m.dest, os.MkdirAll(m.dest, 0755))
+		step("mount "+m.dest, syscall.Mount(m.source, m.dest, m.fstype, m.flags, m.data))
 	}
 	// 掩蔽靠 bind /dev/null，但 rootfs 的 /dev 是空 tmpfs——先自己建出 null 设备。
+	// 这一步要 CAP_MKNOD；它建不出来，下面 11 条掩蔽会全部跟着失败。
 	if _, err := os.Stat("/dev/null"); err != nil {
-		_ = syscall.Mknod("/dev/null", syscall.S_IFCHR|0666, int(devNum(1, 3)))
+		if err := syscall.Mknod("/dev/null", syscall.S_IFCHR|0666, int(devNum(1, 3))); err != nil {
+			step("mknod /dev/null", err)
+		} else if err := os.Chmod("/dev/null", 0666); err != nil {
+			// mknod 的模式会被 umask 掩一下（022 → crw-r--r--），
+			// 但 /dev/null 必须是 0666，否则容器里的非 root 用户写不进去。
+			step("chmod /dev/null", err)
+		}
 	}
 	for _, p := range maskedPaths {
-		if _, err := os.Stat(p); err != nil {
+		fi, err := os.Stat(p)
+		if err != nil {
 			continue
 		}
-		_ = syscall.Mount("/dev/null", p, "", syscall.MS_BIND, "")
+		// 目录不能拿 /dev/null 盖：bind 一个文件到目录 = ENOTDIR。
+		// runc 的做法一致：目录用 size=0 的只读 tmpfs，文件才 bind /dev/null。
+		if fi.IsDir() {
+			step("mask-dir "+p, syscall.Mount("tmpfs", p, "tmpfs", syscall.MS_RDONLY, "size=0k"))
+			continue
+		}
+		step("mask "+p, syscall.Mount("/dev/null", p, "", syscall.MS_BIND, ""))
 	}
 	for _, p := range readonlyPaths {
 		if _, err := os.Stat(p); err != nil {
 			continue
 		}
-		_ = syscall.Mount(p, p, "", syscall.MS_BIND|syscall.MS_REC, "")
-		_ = syscall.Mount("", p, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, "")
+		step("bind "+p, syscall.Mount(p, p, "", syscall.MS_BIND|syscall.MS_REC, ""))
+		step("remount-ro "+p, syscall.Mount("", p, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""))
+	}
+
+	if fail > 0 {
+		fmt.Fprintf(os.Stderr, "worker-init: ⚠️ --harden 有 %d 项没做成：这组 A/B 不可比\n", fail)
 	}
 }
 
