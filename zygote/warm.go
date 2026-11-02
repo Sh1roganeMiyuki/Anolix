@@ -250,11 +250,16 @@ func parseSmapsField(line string) (key string, valKB int, ok bool) {
 //	x86-64: 319 | arm64: 279 | i386: 356
 const sysMemfdCreate = 319 // x86-64
 
+// mfdCloexec = MFD_CLOEXEC：fd 在 execve 时自动关闭。
+// 母体是常驻进程，带上它可以挡住“母体将来任何一次意外 exec 把共享区漏出去”。
+// 不影响传给 worker 的那份：os/exec 是用 dup2 把它挪到 fd 3 的，dup2 会清掉该标志。
+const mfdCloexec = 0x0001
+
 // memfdCreate 用裸 syscall 创建 memfd（不引入 x/sys/unix 依赖）。
 func memfdCreate(name string) (*os.File, error) {
 	nb := append([]byte(name), 0) // C 字符串需 null 结尾
 	fd, _, errno := syscall.RawSyscall(sysMemfdCreate,
-		uintptr(unsafe.Pointer(&nb[0])), 0, 0)
+		uintptr(unsafe.Pointer(&nb[0])), mfdCloexec, 0)
 	if errno != 0 {
 		return nil, fmt.Errorf("memfd_create 失败: %w", error(errno))
 	}

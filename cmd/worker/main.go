@@ -65,6 +65,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "提示: worker 必须由 zygote 母体 spawn（母体带 --warm），不能直接跑")
 		os.Exit(1)
 	}
+	// 映射一建立，fd 就没用了：VMA 自己持有 file reference，close 不影响映射。
+	// 留着它会跟着之后任何一次 fork+exec（比如 attack-pids 里的 /bin/sleep）漏进子进程，
+	// 而那个 fd 是 O_RDWR —— 子进程能改写所有 worker 共享的热数据。
+	if cerr := syscall.Close(zygote.WarmFD); cerr != nil {
+		fmt.Fprintf(os.Stderr, "worker: 关闭 warm fd 失败: %v\n", cerr)
+	}
 	defer syscall.Munmap(region)
 
 	payloadSize := zygote.WarmPayloadSize(region)
