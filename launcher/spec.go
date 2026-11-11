@@ -10,7 +10,11 @@
 package launcher
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"syscall"
 
 	"anolix/config"
 
@@ -289,3 +293,140 @@ func defaultReadonlyPaths() []string {
 // 为什么需要它：OCI 里这些限额字段是"可空的"（指针）——因为 0 有实际含义（=不限制），
 // 不能用 0 表示"没设置"，所以只能用指针区分「nil＝没写」和「0＝写了但值为 0」。
 func int64Ptr(v int64) *int64 { return &v }
+
+// --- 网络翻译：把「launcher 已经建好的网络」写进说明书。
+
+// applyNetwork 把预创建 netns、网络 syscall 放行与 resolv.conf 挂载写进 spec。
+//
+// 调用时机：必须在 network.Setup 成功之后、序列化 config.json 之前。
+// 三层分工：
+//
+//	network 包  在宿主侧把 netns/veth/路由/NAT 建好（内核对象）；
+//	本函数      把“加入哪个 netns、放行哪些调用”写进说明书（策略落点）；
+//	runc        只是照着说明书加入 netns、装 seccomp（执行者）。
+func applyNetwork(spec *specs.Spec, policy *config.Policy, netnsPath, resolvConfPath string) error {
+	if spec == nil || spec.Linux == nil {
+		return errors.New("spec 缺少 linux 段")
+	}
+	if policy.Network.EffectiveMode() != config.NetworkModeBridge {
+		return nil
+	}
+	if netnsPath == "" {
+		return errors.New("network.mode=bridge 但 netns 路径为空")
+	}
+	if !filepath.IsAbs(netnsPath) {
+		return fmt.Errorf("netns 路径必须是绝对路径: %q", netnsPath)
+	}
+
+	// 关键：把 network namespace 的 Path 填上。
+	// Path 非空 = “加入这个已存在的 netns”，而不是“新建一个”。
+	found := false
+	for i := range spec.Linux.Namespaces {
+		if spec.Linux.Namespaces[i].Type == specs.NetworkNamespace {
+			spec.Linux.Namespaces[i].Path = netnsPath
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("spec 缺少 network namespace，无法加入预创建的 netns")
+	}
+
+	// 网络档位下自动扩充 seccomp 白名单。
+	if spec.Linux.Seccomp != nil {
+		mergeNetworkSeccomp(spec.Linux.Seccomp)
+	}
+
+	// DNS：把 bundle 里生成的 resolv.conf 只读挂进容器。
+	// rootfs 里没有 /etc 也没关系：runc 会按 bind 源的类型自动创建空文件与父目录。
+	if resolvConfPath != "" {
+		if !filepath.IsAbs(resolvConfPath) {
+			return fmt.Errorf("resolv.conf 路径必须是绝对路径: %q", resolvConfPath)
+		}
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Destination: "/etc/resolv.conf",
+			Type:        "bind",
+			Source:      resolvConfPath,
+			Options:     []string{"bind", "ro"},
+		})
+	}
+	return nil
+}
+
+// socket 允许的地址族：只给“真正的网络”开口子。
+//
+//   - AF_INET / AF_INET6：TCP/UDP；
+//   - AF_NETLINK：Go 的 net.Interfaces()/InterfaceAddrs() 靠它枚举网卡；
+//     容器能力集为空，netlink 只能读、不能改。
+//
+// 刻意不放行 AF_UNIX：abstract socket 不受 mount namespace 限制，
+// 放行后容器可能连到宿主上的 dbus 等抽象命名空间服务。
+var socketAllowedFamilies = []uint64{
+	uint64(syscall.AF_INET),
+	uint64(syscall.AF_INET6),
+	uint64(syscall.AF_NETLINK),
+}
+
+// networkSocketFiltered 判断网络档位下 socket 是否仍受地址族过滤。
+//
+// 三种“不受过滤”的情形：seccomp 关闭；用户名单显式包含 socket；
+// 网络未开启（此时 socket 本来就被默认动作拒掉，也不存在过滤问题）。
+// 探针据此决定是否断言 AF_UNIX 被拦，避免把用户的自定义名单误判成失败。
+func networkSocketFiltered(s config.Seccomp) bool {
+	if !s.Enabled {
+		return false
+	}
+	// KILL/KILL_PROCESS/TRAP 下 socket(AF_UNIX) 会被直接处理掉，
+	// 探针根本来不及打印结果；这种动作下不做“被拦截”断言。
+	if !config.ActionSupportsErrno(s.EffectiveDefaultAction()) {
+		return false
+	}
+	for _, name := range s.EffectiveAllowedSyscalls() {
+		if name == "socket" {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeNetworkSeccomp 把网络调用并入现有放行名单。
+//
+// 两个细节：
+//  1. 用户名单里已经有的名字不重复添加（libseccomp 不在意重复，但规则越干净越好查）；
+//  2. socket 不用“整条放行”，而是追加三条带参数过滤的规则——
+//     同一 syscall 的多条规则是 OR 关系，domain 不匹配时落到 defaultAction。
+func mergeNetworkSeccomp(sc *specs.LinuxSeccomp) {
+	existing := make(map[string]bool)
+	for _, rule := range sc.Syscalls {
+		for _, name := range rule.Names {
+			existing[name] = true
+		}
+	}
+
+	var extra []string
+	for _, name := range config.NetworkAllowedSyscalls {
+		if !existing[name] {
+			extra = append(extra, name)
+			existing[name] = true
+		}
+	}
+	if len(extra) > 0 {
+		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{
+			Names:  extra,
+			Action: specs.ActAllow,
+		})
+	}
+
+	// 用户显式放行了 socket = 选择“全地址族放行”，不再追加参数过滤。
+	if existing["socket"] {
+		return
+	}
+	for _, family := range socketAllowedFamilies {
+		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{
+			Names:  []string{"socket"},
+			Action: specs.ActAllow,
+			Args: []specs.LinuxSeccompArg{
+				{Index: 0, Value: family, Op: specs.OpEqualTo},
+			},
+		})
+	}
+}

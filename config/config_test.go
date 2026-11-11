@@ -261,3 +261,150 @@ func TestExamplePolicyLoads(t *testing.T) {
 		t.Error("示例 policy 应包含资源围栏基线")
 	}
 }
+
+// TestExampleNetPolicyLoads 确保网络示例不会因为字段名/取值漂移而失效。
+func TestExampleNetPolicyLoads(t *testing.T) {
+	p, err := Load(filepath.Join("..", "examples", "policy-net.json"))
+	if err != nil {
+		t.Fatalf("examples/policy-net.json 应可加载: %v", err)
+	}
+	if got := p.Network.EffectiveMode(); got != NetworkModeBridge {
+		t.Errorf("示例网络 policy 的 mode = %q, 期望 %q", got, NetworkModeBridge)
+	}
+	if len(p.Network.Publish) == 0 {
+		t.Error("示例网络 policy 应包含端口映射")
+	}
+}
+
+func TestParseNetwork(t *testing.T) {
+	src := `{
+	"network": {
+		"mode": "bridge",
+		"bridge": "anolix-test",
+		"subnet": "10.99.0.0/24",
+		"gateway": "10.99.0.1",
+		"dns": ["172.24.48.1"],
+		"publish": ["8080:80", "5353:53/udp"],
+		"mtu": 1400
+	}
+}`
+	p, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse() 出错: %v", err)
+	}
+	if got := p.Network.EffectiveMode(); got != NetworkModeBridge {
+		t.Errorf("EffectiveMode() = %q, 期望 %q", got, NetworkModeBridge)
+	}
+	if got := p.Network.EffectiveBridge(); got != "anolix-test" {
+		t.Errorf("EffectiveBridge() = %q", got)
+	}
+	if got := p.Network.EffectiveSubnet(); got != "10.99.0.0/24" {
+		t.Errorf("EffectiveSubnet() = %q", got)
+	}
+	if got := p.Network.EffectiveGateway(); got != "10.99.0.1" {
+		t.Errorf("EffectiveGateway() = %q", got)
+	}
+	if got := p.Network.EffectiveMTU(); got != 1400 {
+		t.Errorf("EffectiveMTU() = %d", got)
+	}
+	if len(p.Network.Publish) != 2 {
+		t.Errorf("Publish = %v, 期望 2 条", p.Network.Publish)
+	}
+}
+
+func TestNetworkEffectiveDefaults(t *testing.T) {
+	var n Network
+	if got := n.EffectiveMode(); got != NetworkModeNone {
+		t.Errorf("零值 EffectiveMode() = %q, 期望 %q", got, NetworkModeNone)
+	}
+	if got := n.EffectiveBridge(); got != DefaultBridgeName {
+		t.Errorf("EffectiveBridge() = %q", got)
+	}
+	if got := n.EffectiveSubnet(); got != DefaultSubnet {
+		t.Errorf("EffectiveSubnet() = %q", got)
+	}
+	if got := n.EffectiveGateway(); got != "10.88.0.1" {
+		t.Errorf("EffectiveGateway() = %q, 期望 10.88.0.1", got)
+	}
+	if got := n.EffectiveMTU(); got != DefaultMTU {
+		t.Errorf("EffectiveMTU() = %d", got)
+	}
+}
+
+func TestNetworkValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		src     string
+		wantErr bool
+	}{
+		{"缺省 none 合法", `{}`, false},
+		{"none 合法", `{"network": {"mode": "none"}}`, false},
+		{"bridge 缺省参数合法", `{"network": {"mode": "bridge"}}`, false},
+		{"未知档位", `{"network": {"mode": "host"}}`, true},
+		{"网桥名超长", `{"network": {"mode": "bridge", "bridge": "anolix-0123456789"}}`, true},
+		{"网桥名含斜杠", `{"network": {"mode": "bridge", "bridge": "a/b"}}`, true},
+		{"非法子网", `{"network": {"mode": "bridge", "subnet": "10.88.0.0/33"}}`, true},
+		{"IPv6 子网", `{"network": {"mode": "bridge", "subnet": "fd00::/64"}}`, true},
+		{"子网太小", `{"network": {"mode": "bridge", "subnet": "10.88.0.0/31"}}`, true},
+		{"子网太大", `{"network": {"mode": "bridge", "subnet": "10.0.0.0/8"}}`, true},
+		{"网关不在子网", `{"network": {"mode": "bridge", "subnet": "10.88.0.0/24", "gateway": "10.99.0.1"}}`, true},
+		{"网关是网络地址", `{"network": {"mode": "bridge", "subnet": "10.88.0.0/24", "gateway": "10.88.0.0"}}`, true},
+		{"网关是广播地址", `{"network": {"mode": "bridge", "subnet": "10.88.0.0/24", "gateway": "10.88.0.255"}}`, true},
+		{"网关非 IPv4", `{"network": {"mode": "bridge", "gateway": "fd00::1"}}`, true},
+		{"DNS 非法", `{"network": {"mode": "bridge", "dns": ["not-an-ip"]}}`, true},
+		{"端口映射缺冒号", `{"network": {"mode": "bridge", "publish": ["8080"]}}`, true},
+		{"端口映射协议非法", `{"network": {"mode": "bridge", "publish": ["8080:80/sctp"]}}`, true},
+		{"端口映射端口越界", `{"network": {"mode": "bridge", "publish": ["70000:80"]}}`, true},
+		{"端口映射重复", `{"network": {"mode": "bridge", "publish": ["8080:80", "8080:81"]}}`, true},
+		{"TCP/UDP 同端口不冲突", `{"network": {"mode": "bridge", "publish": ["8080:80/tcp", "8080:80/udp"]}}`, false},
+		{"MTU 过小", `{"network": {"mode": "bridge", "mtu": 100}}`, true},
+		{"MTU 过大", `{"network": {"mode": "bridge", "mtu": 70000}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tc.src))
+			if tc.wantErr && err == nil {
+				t.Error("期望报错 实际通过")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("期望通过 实际报错: %v", err)
+			}
+		})
+	}
+}
+
+func TestParsePublish(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    PublishSpec
+		wantErr bool
+	}{
+		{"8080:80", PublishSpec{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}, false},
+		{"5353:53/udp", PublishSpec{HostPort: 5353, ContainerPort: 53, Protocol: "udp"}, false},
+		{" 8443:443/TCP ", PublishSpec{HostPort: 8443, ContainerPort: 443, Protocol: "tcp"}, false},
+		{"", PublishSpec{}, true},
+		{"8080", PublishSpec{}, true},
+		{"8080:", PublishSpec{}, true},
+		{":80", PublishSpec{}, true},
+		{"0:80", PublishSpec{}, true},
+		{"8080:65536", PublishSpec{}, true},
+		{"8080:80/sctp", PublishSpec{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := ParsePublish(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("ParsePublish(%q) 应报错, 实际 %+v", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePublish(%q) 出错: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("ParsePublish(%q) = %+v, 期望 %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

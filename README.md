@@ -2,10 +2,11 @@
 
 轻量沙箱运行时核心：Go 实现，把策略翻译成 OCI 配置，交给 runc / crun 拉起容器执行命令。
 
-- **config**：解析 policy JSON 配置（seccomp 开关、errnoRet、默认动作、放行名单），严格解析 + 取值校验。
+- **config**：解析 policy JSON 配置（seccomp 开关、errnoRet、默认动作、放行名单；cgroup 资源围栏；网络档位），严格解析 + 取值校验。
 - **launcher**：把策略翻译成 OCI bundle（config.json + rootfs），交给启动层执行并透传退出码。
   - 分层：策略层（config）→ 翻译层（spec.go）→ 启动层（runtime.go：runc / crun）→ 生命周期（launcher.go）。
   - 换运行时只换“谁来执行同一份 config.json”，策略与 spec 内容不变。
+- **network**：rootful 容器的网络数据面（网桥 / veth / IPAM / NAT / 端口映射），只在 `network.mode=bridge` 时启用。
 
 ## 快速开始
 
@@ -64,7 +65,7 @@ spec 的其余字段与 runc 完全一致（见 [`launcher/runtime.go`](launcher
 
 ## policy 配置
 
-policy 为 JSON 文件，当前包含 seccomp 与 cgroup v2 资源围栏两部分（示例见 [examples/policy.json](examples/policy.json)）：
+policy 为 JSON 文件，当前包含 seccomp、cgroup v2 资源围栏与网络三部分（示例见 [examples/policy.json](examples/policy.json) 与 [examples/policy-net.json](examples/policy-net.json)）：
 
 ```json
 {
@@ -93,6 +94,21 @@ policy 为 JSON 文件，当前包含 seccomp 与 cgroup v2 资源围栏两部�
 | `resources.pidsLimit` | int64 | 进程数上限，映射 `pids.max`；0 表示不限制 | `0` |
 | `resources.cpuQuotaMicros` | int64 | 每个计费周期可用的 CPU 时间（微秒），映射 `cpu.max` 左值；0 表示不限制 | `0` |
 | `resources.cpuPeriodMicros` | uint64 | CPU 计费周期（微秒，取值 1000–1000000）；仅在设置 `cpuQuotaMicros` 时有效 | `100000` |
+| `network.mode` | string | 网络档位：`none`（只建 network namespace，不联网）/ `bridge`（veth + 宿主网桥 + NAT，需 root） | `none` |
+| `network.bridge` | string | 宿主侧网桥名（≤15 字符） | `anolix0` |
+| `network.subnet` | string | 容器 IPv4 网段（CIDR，/16–/30） | `10.88.0.0/16` |
+| `network.gateway` | string | 容器默认路由的下一跳（网桥地址），必须在子网内且不是网络/广播地址 | 子网第一个可用地址 |
+| `network.dns` | []string | 写入容器 `/etc/resolv.conf` 的服务器 | 自动探测宿主 DNS（跳过回环） |
+| `network.publish` | []string | 端口映射，`宿主端口:容器端口[/tcp|/udp]`，可重复 | 空 |
+| `network.mtu` | int | 网桥与 veth 的 MTU（576–65535） | `1500` |
+
+**网络档位的两条硬约束**：
+
+- `bridge` 需要 root（`sudo`）：launcher 必须在宿主侧创建 netns、veth、网桥与 nft 规则；
+  rootless 下这些对象属于 runc 自己创建的 user namespace，宿主侧没有 `CAP_NET_ADMIN`，会直接报错。
+- 网络开启时会自动把一组网络 syscall 并入 seccomp 白名单，其中 `socket` 额外按地址族过滤
+  （只放行 `AF_INET` / `AF_INET6` / `AF_NETLINK`，拒绝 `AF_UNIX`，避免容器连宿主抽象 socket）。
+  若在 `seccomp.allowedSyscalls` 里显式写入 `socket`，则视为选择全地址族放行。
 
 解析采用严格模式：未知字段、越界 errnoRet、非法动作、非法资源取值都会直接报错，不会静默忽略。
 
@@ -113,6 +129,9 @@ anolix run [flags] -- <command> [args...]
 | `--runc PATH` | 兼容旧参数；等价于 `--runtime PATH`（已弃用） |
 | `--timeout DUR` | 容器运行超时（如 `30s`）；0 表示不限 |
 | `--keep-bundle` | 退出后保留 bundle 目录（调试用） |
+| `--timing` | 打印各阶段耗时（测启动开销用） |
+| `--network MODE` | 覆盖 `policy.network.mode`：`none` / `bridge` |
+| `--publish MAP` | 追加端口映射（可重复）：`8080:80` / `8080:80/udp`，需要 bridge |
 
 ## 行为说明
 
@@ -122,6 +141,13 @@ anolix run [flags] -- <command> [args...]
 - **rootless**：非 root 运行时自动追加 user namespace 与 uid/gid 映射（容器 root → 当前用户），运行时状态目录自动使用用户可写位置（`$XDG_RUNTIME_DIR/anolix-runtime` 或临时目录）。
 - **沙箱基线**：独立 pid/network/ipc/uts/mount/cgroup namespace；能力集清空、`NoNewPrivileges`、仅放行标准设备、掩蔽 `/proc/kcore` 等敏感路径。
 - **rootfs**：解析为规范化的绝对路径后写入 config.json（runc 要求 rootfs 不得含符号链接组件）；`--rootfs` 指向符号链接时自动解析到真实目录。
+- **网络（`network.mode=bridge`）**：launcher 在启动 runc 之前先建好 netns、veth pair、宿主网桥与 nft 规则，
+  再把 netns 路径写进 `config.json`（runc 加入而不是新建）。地址由 `10.88.0.0/16` 的 IPAM 分配，
+  出站经 `inet anolix` 表的 masquerade，端口映射按容器独立 base chain 管理；退出时按下述顺序清理：
+  端口映射 chain → veth → netns → IP 记录。容器内 DNS 由宿主的非回环 nameserver 生成并 bind 挂载。
+  端口映射同时写入 prerouting（外部访问）与 output（宿主本机访问）两条 chain；
+  `127.0.0.1` 的 hairpin 需要 `route_localnet`，第一版未启用，请用宿主网卡地址访问。
+  需要 root；`probe net` 可在容器内查看接口/路由/DNS。
 
 ## 项目结构
 
@@ -129,6 +155,7 @@ anolix run [flags] -- <command> [args...]
 ├── cmd/anolix/       # CLI 入口（参数解析、信号处理、退出码透传）
 ├── cmd/probe/        # 最小沙箱探针（静态编译后放入 rootfs，自检沙箱与 seccomp）
 ├── config/           # policy 解析与校验
+├── network/          # 容器网络数据面：netns / veth / bridge / IPAM / nft NAT
 ├── launcher/
 │   ├── spec.go       # 由 policy 生成 OCI runtime spec（含 seccomp 映射）
 │   ├── runtime.go    # 启动层接缝：解析 runc / crun，组装启动与清理参数

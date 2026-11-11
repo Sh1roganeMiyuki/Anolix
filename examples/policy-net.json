@@ -1,0 +1,19 @@
+{
+  "seccomp": {
+    "enabled": true,
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "errnoRet": 38
+  },
+  "resources": {
+    "memoryLimitBytes": 67108864,
+    "pidsLimit": 128,
+    "cpuQuotaMicros": 50000,
+    "cpuPeriodMicros": 100000
+  },
+  "network": {
+    "mode": "bridge",
+    "subnet": "10.88.0.0/16",
+    "gateway": "10.88.0.1",
+    "publish": ["8080:80"]
+  }
+}

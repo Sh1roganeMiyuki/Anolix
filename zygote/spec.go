@@ -9,7 +9,7 @@
 //	│ Capabilities   │ 清空                  │ 见下方 capMothers（worker-init 用完即卸）│
 //	│ Seccomp        │ 严格白名单            │ 关闭（母体需要全量 syscall）   │
 //	│ NoNewPrivileges│ true                  │ false（母体是受信进程）        │
-//	│ 网络           │ 隔离（无网）          │ 隔离（通过 socket 通信即可）   │
+//	│ 网络           │ 隔离（无网）          │ 隔离（worker netns 的 lo 由 init 拉起）│
 //	└────────────────┴──────────────────────┴──────────────────────────────┘
 //
 // 为什么母体不带 PID namespace：
@@ -152,8 +152,12 @@ func BuildMotherSpec(cfg MotherConfig) *specs.Spec {
 //	CAP_SETPCAP    worker-init 卸能力时 PR_CAPBSET_DROP 需要它；
 //	               它自己也在这张表里——用一把钥匙拆掉整个钥匙串
 //
-// CAP_SYS_CHROOT / CAP_NET_ADMIN 当前无人使用（worker-init 用 PivotRoot 不用 chroot，
-// 全程不碰网络），保留是为了不改动母体已有行为；确认无影响后可以剪掉。
+// CAP_SYS_CHROOT / CAP_NET_ADMIN 的现状：
+//
+//	CAP_SYS_CHROOT 当前无人使用（worker-init 用 PivotRoot 不用 chroot），
+//	               保留是为了不改动母体已有行为；确认无影响后可以剪掉。
+//	CAP_NET_ADMIN  worker-init 用它拉起 worker netns 的 lo（新 netns 默认 down）；
+//	               这个动作在 DropCapabilities 之前完成，payload 拿不到该能力。
 func MotherCapabilities() []string {
 	return []string{
 		"CAP_SYS_ADMIN",

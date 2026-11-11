@@ -63,6 +63,9 @@ func run() int {
 	keepBundle := fs.Bool("keep-bundle", false, "退出后保留 bundle 目录（调试用）")
 	timing := fs.Bool("timing", false, "打印各阶段耗时（测启动开销用）")
 	minimalRootfs := fs.Bool("minimal-rootfs", false, "只挂 /proc 与 /dev，不掩蔽/不重挂（A/B 对比用）")
+	networkMode := fs.String("network", "", "网络档位：none（缺省）/ bridge；覆盖 policy.network.mode")
+	var publish stringList
+	fs.Var(&publish, "publish", "端口映射（可重复）：8080:80 或 8080:80/udp；需要 network.mode=bridge")
 
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
@@ -85,6 +88,11 @@ func run() int {
 			return 1
 		}
 		policy = p
+	}
+	// --network 是临时开关：覆盖 policy 里的档位，其余网络参数（网段/网关/DNS）不变。
+	// 校验统一交给 launcher.New（它会跑 policy.Validate）。
+	if *networkMode != "" {
+		policy.Network.Mode = *networkMode
 	}
 
 	// --timing 的两个起点锚：
@@ -116,6 +124,7 @@ func run() int {
 		Timing:        *timing,
 		T0NS:          t0ns,
 		MinimalRootfs: *minimalRootfs,
+		Publish:       publish,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "anolix: %v\n", err)
@@ -166,10 +175,23 @@ flags:
   --timeout DUR    容器运行超时（如 30s）；0 表示不限
   --keep-bundle    退出后保留 bundle 目录（调试用）
   --timing         打印各阶段耗时（测启动开销用）
+  --network MODE   网络档位：none（缺省）/ bridge；覆盖 policy.network.mode
+  --publish MAP    端口映射（可重复）：8080:80 或 8080:80/udp；需要 bridge
 
 示例:
   anolix run --policy examples/policy.json --rootfs ./rootfs -- /probe
   anolix run --runtime crun --rootfs ./rootfs -- /probe
+  anolix run --network bridge --publish 8080:80 --rootfs ./rootfs -- /probe net
   anolix run --rootfs ./rootfs -- /probe hold 60   # 演示超时/中断
 `)
+}
+
+// stringList 是 flag.Value 的实现：让 --publish 可以重复出现。
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }

@@ -3,11 +3,12 @@
 // 这个包只干三件事：读 JSON → 检查合法性 → 把"没填的字段"补上默认值。
 // 它不碰容器、不碰进程——真正的翻译在 launcher/spec.go，执行在 runc。
 //
-// policy 以 JSON 描述沙箱运行策略，当前包含两部分：
+// policy 以 JSON 描述沙箱运行策略，当前包含三部分：
 //   - seccomp：是否启用（enabled）、被拒绝的系统调用返回的 errno（errnoRet）、
 //     默认动作（defaultAction）与放行名单（allowedSyscalls）；
 //   - resources：cgroup v2 资源围栏（内存上限、进程数上限、CPU 配额），
-//     各字段为 0 表示不限制。
+//     各字段为 0 表示不限制；
+//   - network：网络档位（none / bridge）与 bridge 参数（网段、网关、DNS、端口映射）。
 package config
 
 import (
@@ -15,7 +16,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -88,6 +91,25 @@ var DefaultAllowedSyscalls = []string{
 	"write", "writev",
 }
 
+// NetworkAllowedSyscalls 是 network.mode=bridge 时自动并入白名单的网络调用。
+//
+// 为什么单独成组、而不是塞进 DefaultAllowedSyscalls：
+//   - 默认（none）档位必须继续拒绝网络与套接字相关调用；
+//   - 只有真正配了网卡，才需要放行这些调用。
+//
+// 注意这里刻意不含 socket：socket 需要按“地址族”做参数过滤（见 launcher/spec.go），
+// 否则容器可以创建 AF_UNIX 套接字去连宿主的抽象命名空间（如 dbus），
+// 而 abstract socket 不受 mount namespace 限制。
+//
+// 另外，网络调用放行后容器仍没有 CAP_NET_RAW：普通 TCP/UDP 可用，ping 不行。
+var NetworkAllowedSyscalls = []string{
+	"accept", "accept4", "bind", "connect",
+	"getpeername", "getsockname", "getsockopt", "listen",
+	"recvfrom", "recvmmsg", "recvmsg",
+	"sendmmsg", "sendmsg", "sendto", "setsockopt", "shutdown",
+	"socketpair",
+}
+
 // DefaultCPUPeriodMicros 是 cpuPeriodMicros 未配置时使用的默认计费周期：100ms。
 // 白话：CPU 配额是"每个周期最多用多少"，周期默认 100 毫秒。
 const DefaultCPUPeriodMicros uint64 = 100000
@@ -101,12 +123,15 @@ const (
 )
 
 // Policy 是 Anolix 的沙箱运行策略（= 你写给沙箱的"规矩说明书"）。
-// 分两大块：seccomp（哪些系统调用能用）+ resources（能用多少资源）。
+// 分三大块：seccomp（哪些系统调用能用）+ resources（能用多少资源）
+// + network（有没有网、怎么连）。
 type Policy struct {
 	// Seccomp 是 seccomp 安检机的配置（见下）。
 	Seccomp Seccomp `json:"seccomp"`
 	// Resources 是 cgroup v2 资源围栏（内存/进程数/CPU）；字段为 0 = 不限制。
 	Resources Resources `json:"resources"`
+	// Network 是网络档位与参数；零值 = none（只隔离、不联网），保持旧 policy 行为不变。
+	Network Network `json:"network"`
 }
 
 // Seccomp 描述"安检机"的行为。四个字段分别回答四个问题：
@@ -143,6 +168,167 @@ type Resources struct {
 	// CPUPeriodMicros → 内核文件 cpu.max 的右值（计费周期，微秒，1000–1000000）。
 	// 只在设置了配额时才有效；不填就用默认 100ms。
 	CPUPeriodMicros uint64 `json:"cpuPeriodMicros"`
+}
+
+// --- 网络档位：none（默认，无网）/ bridge（veth + 宿主网桥 + NAT，需要 root）。
+//
+// 白话：none 不是“没做网络”，而是“只给容器一间上锁的网络房间”——
+// 有独立的 network namespace，但里面没有网卡、没有地址、没有路由。
+// bridge 才是在这间房里接入一张网卡，并通过宿主网桥出去。
+const (
+	// NetworkModeNone 是默认档位：只建 network namespace，不配置任何接口。
+	NetworkModeNone = "none"
+	// NetworkModeBridge 给容器接 veth + 宿主网桥 + NAT。
+	// 需要在宿主侧创建/配置网络设备，因此要求 root（rootless 不支持）。
+	NetworkModeBridge = "bridge"
+)
+
+// 网络参数的默认值。
+//
+// 网段选 10.88.0.0/16：避开 Docker 默认的 172.17/16、本机 WSL 的 172.24/20
+// 以及 docker0 的 172.18/16。改网段前先确认宿主没有同网段路由，否则会冲突。
+const (
+	DefaultBridgeName = "anolix0"
+	DefaultSubnet     = "10.88.0.0/16"
+	DefaultMTU        = 1500
+
+	minMTU = 576
+	maxMTU = 65535
+)
+
+// Network 描述容器的网络档位与 bridge 参数。
+//
+// 字段全为零值时 = {mode: none}：容器有独立网络命名空间，但无网可用。
+type Network struct {
+	// Mode："none"（缺省）或 "bridge"。
+	Mode string `json:"mode"`
+	// Bridge：宿主侧网桥名；留空 = anolix0。
+	Bridge string `json:"bridge"`
+	// Subnet：容器网段（IPv4 CIDR）；留空 = 10.88.0.0/16。
+	Subnet string `json:"subnet"`
+	// Gateway：容器默认路由的下一跳，也是网桥上的地址；留空 = 网段第一个可用地址。
+	Gateway string `json:"gateway"`
+	// DNS：写入容器 /etc/resolv.conf 的服务器；留空 = 自动探测宿主 DNS。
+	DNS []string `json:"dns"`
+	// Publish：端口映射，格式 "宿主端口:容器端口[/tcp|/udp]"，如 "8080:80"。
+	Publish []string `json:"publish"`
+	// MTU：网桥与 veth 的 MTU；0 = 1500。
+	MTU int `json:"mtu"`
+}
+
+// PublishSpec 是解析后的端口映射规则。
+type PublishSpec struct {
+	HostPort      int    // 宿主侧监听的端口
+	ContainerPort int    // 容器内被转发的端口
+	Protocol      string // "tcp" 或 "udp"
+}
+
+// ParsePublish 解析一条端口映射："8080:80" 或 "8080:80/udp"。
+//
+// 白话：冒号左边是“宿主上开的门”，右边是“容器里要敲的门”；
+// 不写协议默认 TCP（绝大多数场景），写 /udp 才是 UDP。
+func ParsePublish(s string) (PublishSpec, error) {
+	var out PublishSpec
+	text := strings.TrimSpace(s)
+	if text == "" {
+		return out, fmt.Errorf("端口映射不能为空")
+	}
+
+	proto := "tcp"
+	if i := strings.LastIndexByte(text, '/'); i >= 0 {
+		proto = strings.ToLower(strings.TrimSpace(text[i+1:]))
+		text = text[:i]
+	}
+	if proto != "tcp" && proto != "udp" {
+		return out, fmt.Errorf("端口映射 %q 的协议 %q 非法，可选 tcp / udp", s, proto)
+	}
+
+	parts := strings.Split(text, ":")
+	if len(parts) != 2 {
+		return out, fmt.Errorf("端口映射 %q 格式应为 宿主端口:容器端口[/tcp|/udp]", s)
+	}
+	hostPort, err := parsePort(parts[0])
+	if err != nil {
+		return out, fmt.Errorf("端口映射 %q 的宿主端口非法: %w", s, err)
+	}
+	containerPort, err := parsePort(parts[1])
+	if err != nil {
+		return out, fmt.Errorf("端口映射 %q 的容器端口非法: %w", s, err)
+	}
+	return PublishSpec{HostPort: hostPort, ContainerPort: containerPort, Protocol: proto}, nil
+}
+
+// parsePort 解析并校验端口号（1-65535）。
+func parsePort(s string) (int, error) {
+	port, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("不是数字: %q", s)
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("超出范围 (1-65535): %d", port)
+	}
+	return port, nil
+}
+
+// EffectiveMode 返回生效的网络档位：留空 = none；归一化大小写与空白。
+func (n Network) EffectiveMode() string {
+	mode := strings.ToLower(strings.TrimSpace(n.Mode))
+	if mode == "" {
+		return NetworkModeNone
+	}
+	return mode
+}
+
+// EffectiveBridge 返回生效的网桥名：留空 = anolix0。
+func (n Network) EffectiveBridge() string {
+	if n.Bridge == "" {
+		return DefaultBridgeName
+	}
+	return n.Bridge
+}
+
+// EffectiveSubnet 返回生效的容器网段：留空 = 10.88.0.0/16。
+func (n Network) EffectiveSubnet() string {
+	if n.Subnet == "" {
+		return DefaultSubnet
+	}
+	return n.Subnet
+}
+
+// EffectiveGateway 返回生效的网关：留空 = 网段第一个可用地址。
+//
+// 例：10.88.0.0/16 → 10.88.0.1。
+// 这里只做“从 CIDR 推一个默认值”，合法性由 Validate 统一检查。
+func (n Network) EffectiveGateway() string {
+	if n.Gateway != "" {
+		return n.Gateway
+	}
+	_, ipnet, err := net.ParseCIDR(n.EffectiveSubnet())
+	if err != nil {
+		return ""
+	}
+	ip := ipnet.IP.To4()
+	if ip == nil {
+		return ""
+	}
+	gw := make(net.IP, 4)
+	copy(gw, ip)
+	// 网络地址 +1：从最后一字节往上加，遇 0 表示进位。
+	for i := 3; i >= 0; i-- {
+		gw[i]++
+		if gw[i] != 0 {
+			break
+		}
+	}
+	return gw.String()
+}
+
+// EffectiveMTU 返回生效的 MTU：0 = 1500。
+func (n Network) EffectiveMTU() int {
+	if n.MTU == 0 {
+		return DefaultMTU
+	}
+	return n.MTU
 }
 
 // Default 返回内置默认策略：开 seccomp、拦截回 EPERM、用内置名单。
@@ -232,7 +418,108 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("seccomp allowedSyscalls 条目 %q 含空白字符", name)
 		}
 	}
-	return p.Resources.Validate()
+	if err := p.Resources.Validate(); err != nil {
+		return err
+	}
+	return p.Network.Validate()
+}
+
+// Validate 校验网络档位与参数是否合法。
+//
+// 白话：网络参数比资源围栏更容易“写错但看着没事”——比如网关不在子网里，
+// 启动后容器就是不通，而报错发生在很远的地方。所以这里把能提前查的全查了。
+func (n Network) Validate() error {
+	mode := n.EffectiveMode()
+	switch mode {
+	case NetworkModeNone, NetworkModeBridge:
+	default:
+		return fmt.Errorf("不支持的 network.mode %q，可选: %s, %s", n.Mode, NetworkModeNone, NetworkModeBridge)
+	}
+
+	// 网桥名就是宿主上的接口名：内核限制 15 字符（IFNAMSIZ 16 含结尾 0），
+	// 且不能含路径分隔符或空白（ip 命令会把它当参数解析）。
+	bridge := n.EffectiveBridge()
+	if bridge == "." || bridge == ".." || strings.ContainsAny(bridge, "/ \t\n") {
+		return fmt.Errorf("network.bridge %q 不是合法的接口名", bridge)
+	}
+	if len(bridge) > 15 {
+		return fmt.Errorf("network.bridge %q 超过 15 字符（内核接口名上限）", bridge)
+	}
+
+	ipnet, err := parseSubnet(n.EffectiveSubnet())
+	if err != nil {
+		return err
+	}
+	// 至少要有“网络地址 + 网关 + 一个容器地址 + 广播地址”四格，
+	// 所以 /31、/32 这类点对点/单机子网没有意义；
+	// 上界 /16（最多 65536 个地址）是为了让 IPAM 的线性探测保持在可接受范围，
+	// /8 这类大网段会让「地址池满」的探测变成百万级文件操作。
+	if ones, bits := ipnet.Mask.Size(); bits-ones < 2 || bits-ones > 16 {
+		return fmt.Errorf("network.subnet %q 不在支持范围（需 /16 .. /30）", n.EffectiveSubnet())
+	}
+
+	gw := n.EffectiveGateway()
+	gwIP := net.ParseIP(gw)
+	if gwIP == nil || gwIP.To4() == nil {
+		return fmt.Errorf("network.gateway %q 不是合法的 IPv4 地址", gw)
+	}
+	if !ipnet.Contains(gwIP) {
+		return fmt.Errorf("network.gateway %s 不在子网 %s 内", gw, n.EffectiveSubnet())
+	}
+	if isNetworkOrBroadcast(ipnet, gwIP.To4()) {
+		return fmt.Errorf("network.gateway %s 不能是网络地址或广播地址", gw)
+	}
+
+	for _, dns := range n.DNS {
+		if ip := net.ParseIP(strings.TrimSpace(dns)); ip == nil {
+			return fmt.Errorf("network.dns 条目 %q 不是合法的 IP 地址", dns)
+		}
+	}
+
+	// 端口映射：除了逐条语法，还要查“宿主端口重复”——
+	// 两条规则抢同一个宿主端口时，后一条不会生效，静默失效比报错难查得多。
+	seen := make(map[string]string, len(n.Publish))
+	for _, raw := range n.Publish {
+		pub, err := ParsePublish(raw)
+		if err != nil {
+			return fmt.Errorf("network.publish 非法: %w", err)
+		}
+		key := fmt.Sprintf("%s/%d", pub.Protocol, pub.HostPort)
+		if prev, ok := seen[key]; ok {
+			return fmt.Errorf("network.publish 重复占用宿主端口: %q 与 %q", prev, raw)
+		}
+		seen[key] = raw
+	}
+
+	if n.MTU != 0 && (n.MTU < minMTU || n.MTU > maxMTU) {
+		return fmt.Errorf("network.mtu %d 超出合法范围 (%d-%d)", n.MTU, minMTU, maxMTU)
+	}
+	return nil
+}
+
+// parseSubnet 解析 IPv4 CIDR，并拒绝 IPv6（容器内只配 IPv4 栈）。
+func parseSubnet(cidr string) (*net.IPNet, error) {
+	ip, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return nil, fmt.Errorf("network.subnet %q 不是合法的 CIDR: %w", cidr, err)
+	}
+	if ip.To4() == nil {
+		return nil, fmt.Errorf("network.subnet %q 不是 IPv4 网段（当前只支持 IPv4）", cidr)
+	}
+	return ipnet, nil
+}
+
+// isNetworkOrBroadcast 判断 IPv4 地址是否落在子网的网络地址/广播地址上。
+func isNetworkOrBroadcast(ipnet *net.IPNet, ip net.IP) bool {
+	network := ipnet.IP.To4()
+	if network == nil || ip == nil {
+		return false
+	}
+	broadcast := make(net.IP, 4)
+	for i := 0; i < 4; i++ {
+		broadcast[i] = network[i] | ^ipnet.Mask[i]
+	}
+	return ip.Equal(network) || ip.Equal(broadcast)
 }
 
 // --- 【可略读】细节校验：知道"启动前把非法值拒绝掉"即可，各条不必背。

@@ -587,3 +587,126 @@ func TestRunCanonicalizesSymlinkedRootfs(t *testing.T) {
 		t.Errorf("符号链接 rootfs 应被规范化为 %s, 实际 %s", want, spec.Root.Path)
 	}
 }
+
+func TestApplyNetwork(t *testing.T) {
+	policy := config.Default()
+	policy.Network = config.Network{Mode: config.NetworkModeBridge}
+	spec := buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+
+	if err := applyNetwork(spec, policy, "/run/netns/anolix-test", "/tmp/bundle/resolv.conf"); err != nil {
+		t.Fatalf("applyNetwork() 出错: %v", err)
+	}
+
+	// 1. netns Path 必须填上（runc 靠它加入预创建的 netns）。
+	netnsFound := false
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == specs.NetworkNamespace {
+			netnsFound = true
+			if ns.Path != "/run/netns/anolix-test" {
+				t.Errorf("network namespace Path = %q", ns.Path)
+			}
+		}
+	}
+	if !netnsFound {
+		t.Fatal("spec 缺少 network namespace")
+	}
+
+	// 2. seccomp：网络调用应被追加，socket 必须带地址族过滤。
+	sc := spec.Linux.Seccomp
+	if sc == nil {
+		t.Fatal("seccomp 不应为 nil")
+	}
+	allowed := make(map[string]bool)
+	var socketRules []specs.LinuxSyscall
+	for _, rule := range sc.Syscalls {
+		for _, name := range rule.Names {
+			allowed[name] = true
+			if name == "socket" {
+				socketRules = append(socketRules, rule)
+			}
+		}
+	}
+	for _, want := range []string{"connect", "bind", "listen", "sendto", "recvfrom", "setsockopt"} {
+		if !allowed[want] {
+			t.Errorf("seccomp 应放行 %q", want)
+		}
+	}
+	if len(socketRules) != len(socketAllowedFamilies) {
+		t.Fatalf("socket 规则数 = %d, 期望 %d（每个地址族一条）", len(socketRules), len(socketAllowedFamilies))
+	}
+	for i, rule := range socketRules {
+		if len(rule.Args) != 1 || rule.Args[0].Op != specs.OpEqualTo {
+			t.Errorf("socket 规则 %d 缺少参数过滤: %+v", i, rule)
+			continue
+		}
+		if rule.Args[0].Value != socketAllowedFamilies[i] {
+			t.Errorf("socket 规则 %d 地址族 = %d, 期望 %d", i, rule.Args[0].Value, socketAllowedFamilies[i])
+		}
+	}
+
+	// 3. resolv.conf 应作为只读 bind mount 追加。
+	foundMount := false
+	for _, m := range spec.Mounts {
+		if m.Destination == "/etc/resolv.conf" {
+			foundMount = true
+			if m.Type != "bind" || m.Source != "/tmp/bundle/resolv.conf" {
+				t.Errorf("resolv.conf mount = %+v", m)
+			}
+		}
+	}
+	if !foundMount {
+		t.Error("缺少 /etc/resolv.conf 挂载")
+	}
+}
+
+func TestApplyNetworkNoneIsNoop(t *testing.T) {
+	policy := config.Default() // Network 零值 = none
+	spec := buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+	before := len(spec.Linux.Seccomp.Syscalls)
+
+	if err := applyNetwork(spec, policy, "", ""); err != nil {
+		t.Fatalf("none 档位不应报错: %v", err)
+	}
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == specs.NetworkNamespace && ns.Path != "" {
+			t.Errorf("none 档位不应设置 netns Path: %q", ns.Path)
+		}
+	}
+	if got := len(spec.Linux.Seccomp.Syscalls); got != before {
+		t.Errorf("none 档位不应改变 seccomp 规则数: %d → %d", before, got)
+	}
+}
+
+func TestApplyNetworkRequiresNetNSPath(t *testing.T) {
+	policy := config.Default()
+	policy.Network = config.Network{Mode: config.NetworkModeBridge}
+	spec := buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+	if err := applyNetwork(spec, policy, "", ""); err == nil {
+		t.Error("bridge 档位缺少 netns 路径时应报错")
+	}
+}
+
+func TestApplyNetworkUserSocketBypassesFilter(t *testing.T) {
+	policy := config.Default()
+	policy.Network = config.Network{Mode: config.NetworkModeBridge}
+	// 用户显式把 socket 放进名单 = 选择全地址族放行。
+	policy.Seccomp.AllowedSyscalls = append(append([]string{}, config.DefaultAllowedSyscalls...), "socket")
+	spec := buildSpec(policy, []string{"/probe"}, DefaultEnv, "rootfs", false)
+	if err := applyNetwork(spec, policy, "/run/netns/c1", ""); err != nil {
+		t.Fatalf("applyNetwork() 出错: %v", err)
+	}
+	var socketRules []specs.LinuxSyscall
+	for _, rule := range spec.Linux.Seccomp.Syscalls {
+		for _, name := range rule.Names {
+			if name == "socket" {
+				socketRules = append(socketRules, rule)
+			}
+		}
+	}
+	if len(socketRules) != 1 {
+		t.Fatalf("用户已放行 socket 时不应追加参数规则, 实际 %d 条", len(socketRules))
+	}
+	if len(socketRules[0].Args) != 0 {
+		t.Errorf("用户规则不应被改写: %+v", socketRules[0])
+	}
+}

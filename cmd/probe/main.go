@@ -14,8 +14,10 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -31,6 +33,12 @@ func main() {
 }
 
 func run() int {
+	// `probe net [tcp host:port | dns name]`：网络数据面调试子命令。
+	// 它不参与沙箱断言，只把容器里真实看到的接口/路由/DNS 打出来。
+	if len(os.Args) > 1 && os.Args[1] == "net" {
+		return runNet(os.Args[2:])
+	}
+
 	// `probe hold <秒>`：仅休眠，便于演示 --timeout 与 Ctrl+C 中断。
 	if len(os.Args) > 2 && os.Args[1] == "hold" {
 		secs, err := strconv.Atoi(os.Args[2])
@@ -90,13 +98,17 @@ func run() int {
 		check(true, "rootfs 可写", "成功写入并删除测试文件")
 	}
 
-	// 5. seccomp 探测：socket / ptrace 默认不在放行名单中，应被拦截；
+	// 5. seccomp 探测：网络档位下 socket 应可用；默认无网档位下应被拦截。
 	// 两个调用均无需特权，若返回 EPERM/ENOSYS 即可确认是 seccomp 拦截；
 	// 返回的 errno 由 policy 的 errnoRet 决定（EPERM 或 ENOSYS）。
-	errno, err := probeSocket()
-	check(blocked(errno), "seccomp 拦截 socket", describeProbe(errno, err))
+	if os.Getenv("ANOLIX_NETWORK_MODE") == "bridge" {
+		checkNetworkEnabled(check)
+	} else {
+		errno, err := probeSocket()
+		check(blocked(errno), "seccomp 拦截 socket", describeProbe(errno, err))
+	}
 
-	errno, err = probePtrace()
+	errno, err := probePtrace()
 	check(blocked(errno), "seccomp 拦截 ptrace", describeProbe(errno, err))
 
 	if !inContainer {
@@ -109,6 +121,210 @@ func run() int {
 	}
 	fmt.Println("=== 结果: 全部检查通过 ===")
 	return 0
+}
+
+// runNet 是 `probe net` 的实现：打印网络快照，可选做连通性测试。
+//
+// 用法：
+//
+//	probe net                      # 快照
+//	probe net tcp 10.88.0.1:80     # 尝试 TCP 连接
+//	probe net dns example.com      # 尝试域名解析
+func runNet(args []string) int {
+	fmt.Println("=== Anolix 网络快照 ===")
+	fmt.Printf("[env] mode=%s ip=%s gateway=%s\n",
+		orNone(os.Getenv("ANOLIX_NETWORK_MODE")),
+		orNone(os.Getenv("ANOLIX_CONTAINER_IP")),
+		orNone(os.Getenv("ANOLIX_GATEWAY")))
+	printInterfaces()
+	printRoutes()
+	printResolv()
+
+	if len(args) == 0 {
+		return 0
+	}
+	switch args[0] {
+	case "tcp":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "用法: probe net tcp <host:port>")
+			return 2
+		}
+		conn, err := net.DialTimeout("tcp", args[1], 3*time.Second)
+		if err != nil {
+			fmt.Printf("[fail] tcp %s: %v\n", args[1], err)
+			return 1
+		}
+		_ = conn.Close()
+		fmt.Printf("[ok]   tcp %s 可连通\n", args[1])
+		return 0
+	case "dns":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "用法: probe net dns <域名>")
+			return 2
+		}
+		addrs, err := net.LookupHost(args[1])
+		if err != nil {
+			fmt.Printf("[fail] dns %s: %v\n", args[1], err)
+			return 1
+		}
+		fmt.Printf("[ok]   dns %s → %s\n", args[1], strings.Join(addrs, ", "))
+		return 0
+	case "serve":
+		// 端口映射的测试服务：在容器内监听，宿主经 DNAT 访问。
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "用法: probe net serve <端口>")
+			return 2
+		}
+		ln, err := net.Listen("tcp", ":"+args[1])
+		if err != nil {
+			fmt.Printf("[fail] listen :%s: %v\n", args[1], err)
+			return 1
+		}
+		defer ln.Close()
+		fmt.Printf("[ok]   监听 :%s\n", args[1])
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				fmt.Printf("[fail] accept: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(conn, "anolix probe")
+			_ = conn.Close()
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "未知子命令 %q（可选 tcp / dns）\n", args[0])
+		return 2
+	}
+}
+
+// checkNetworkEnabled 是网络档位下的正向断言。
+//
+// 与“无网档位断言 socket 被拦”恰好相反：同一份探针要能回答两种问题——
+// “门关上了吗”和“门打开后路通不通”。
+func checkNetworkEnabled(check func(bool, string, string)) {
+	iface, err := net.InterfaceByName("eth0")
+	if err != nil {
+		check(false, "网络接口 eth0", fmt.Sprintf("不存在或不可读: %v", err))
+	} else {
+		check(true, "网络接口 eth0", fmt.Sprintf("mtu=%d flags=%s", iface.MTU, iface.Flags))
+		check(iface.Flags&net.FlagUp != 0, "eth0 UP", iface.Flags.String())
+		addrs, aerr := iface.Addrs()
+		if aerr != nil {
+			check(false, "eth0 地址", aerr.Error())
+		} else {
+			var v4 []string
+			for _, addr := range addrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					v4 = append(v4, ipnet.String())
+				}
+			}
+			check(len(v4) > 0, "eth0 IPv4 地址", strings.Join(v4, ", "))
+		}
+	}
+	check(hasDefaultRoute(), "默认路由", "从 /proc/net/route 读取")
+	errno, err := probeSocket()
+	check(errno == 0, "socket 可用（网络档位）", describeProbe(errno, err))
+
+	// AF_UNIX 过滤只在“用户没有显式放行 socket”时由 launcher 打开断言，
+	// 避免把用户的自定义名单误判成失败。
+	if os.Getenv("ANOLIX_NETWORK_STRICT_SOCKET") == "1" {
+		uerrno, uerr := probeSocketDomain(syscall.AF_UNIX)
+		check(blocked(uerrno), "seccomp 拦截 AF_UNIX socket", describeProbe(uerrno, uerr))
+	}
+}
+
+// printInterfaces 打印容器内所有接口与地址（走 netlink）。
+func printInterfaces() {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Printf("[ifaces] 读取失败: %v\n", err)
+		return
+	}
+	for _, iface := range ifaces {
+		addrs, _ := iface.Addrs()
+		var list []string
+		for _, addr := range addrs {
+			list = append(list, addr.String())
+		}
+		fmt.Printf("[iface] %-8s mtu=%-5d flags=%-24s addrs=%s\n",
+			iface.Name, iface.MTU, iface.Flags, strings.Join(list, ","))
+	}
+}
+
+// printRoutes 把 /proc/net/route 的十六进制字段翻译成人能读的地址。
+func printRoutes() {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		fmt.Printf("[route] 读取失败: %v\n", err)
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	first := true
+	for scanner.Scan() {
+		if first {
+			first = false // 跳过表头
+			continue
+		}
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 8 {
+			continue
+		}
+		flags, _ := strconv.ParseUint(fields[3], 16, 32)
+		kind := ""
+		if flags&0x2 != 0 {
+			kind = " (gateway)"
+		}
+		fmt.Printf("[route] iface=%-6s dst=%-15s gw=%-15s mask=%-15s%s\n",
+			fields[0], parseHexIPv4(fields[1]), parseHexIPv4(fields[2]), parseHexIPv4(fields[7]), kind)
+	}
+}
+
+// printResolv 打印容器里实际看到的 DNS 配置。
+func printResolv() {
+	data, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		fmt.Printf("[resolv] 读取失败: %v\n", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fmt.Printf("[resolv] %s\n", line)
+	}
+}
+
+// hasDefaultRoute 判断容器里是否存在默认路由（Destination = 0.0.0.0）。
+func hasDefaultRoute() bool {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	first := true
+	for scanner.Scan() {
+		if first {
+			first = false
+			continue
+		}
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 8 && fields[1] == "00000000" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseHexIPv4 把 /proc/net/route 的小端十六进制地址转成点分十进制。
+func parseHexIPv4(s string) string {
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return s
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 }
 
 // readStatus 解析 /proc/self/status 为字段映射。
@@ -169,7 +385,13 @@ func probeWrite() error {
 
 // probeSocket 尝试创建 AF_INET socket；返回 errno（0 表示调用成功）。
 func probeSocket() (syscall.Errno, error) {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	return probeSocketDomain(syscall.AF_INET)
+}
+
+// probeSocketDomain 尝试创建指定地址族的 socket；返回 errno（0 = 成功）。
+// 网络档位下 AF_UNIX 应被 seccomp 参数过滤拦下，AF_INET 应放行。
+func probeSocketDomain(domain int) (syscall.Errno, error) {
+	fd, err := syscall.Socket(domain, syscall.SOCK_STREAM, 0)
 	if err == nil {
 		_ = syscall.Close(fd)
 		return 0, nil

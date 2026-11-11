@@ -269,7 +269,7 @@ Worker 获得的 6 间房（由 `clone` 的 `CLONE_NEW*` flags 一步创建）�
 | PID | CLONE_NEWPID | worker = PID 1；其子进程 = 2, 3… |
 | UTS | CLONE_NEWUTS | 独立主机名 |
 | IPC | CLONE_NEWIPC | 独立共享内存/消息队列 |
-| Network | CLONE_NEWNET | 无网络（只有 down 的 loopback） |
+| Network | CLONE_NEWNET | 无外部网络（loopback 由 worker-init 拉起） |
 | Cgroup | CLONE_NEWCGROUP | 独立 cgroup 视图 |
 
 验证手段：

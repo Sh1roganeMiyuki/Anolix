@@ -7,10 +7,14 @@
 //
 // 顺序（很重要）：
 //
-//	mount 私有化 → bind rootfs → pivot_root → 挂 /proc → 卸能力 → 装 seccomp → execve payload
+//	mount 私有化 → bind rootfs → pivot_root → 挂 /proc → 拉起 lo → 卸能力 → 装 seccomp → execve payload
 //
 //	rootfs 相关的 syscall（mount/pivot_root）必须在**装 seccomp 之前**做完——
 //	否则会被自己的过滤器拦（自缚）；装完过滤器后 init 只剩一条 execve。
+//
+//	拉起 lo 必须在卸能力之前（SIOCSIFFLAGS 要 CAP_NET_ADMIN）。
+//	worker 的 netns 是 clone(CLONE_NEWNET) 新建的，lo 默认 down；
+//	不拉起它，worker 内连 127.0.0.1 都不通。
 //
 //	卸能力必须卡在 setupRootfs() 返回之后（那之前每个 mount 都要 CAP_SYS_ADMIN），
 //	而 execve 之前要同时拆 Bounding + 清空五个集合：uid 0 在 execve 时会按
@@ -64,7 +68,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	// 2) 卸能力。mount / pivot_root 都要 CAP_SYS_ADMIN，这些活已在 setupRootfs 里
+	// 2) 网络：worker 的 netns 是 clone(CLONE_NEWNET) 新建的，lo 默认 down。
+	//    拉起 lo 需要 CAP_NET_ADMIN（必须在卸能力之前），
+	//    同时需要 socket/ioctl（必须在装 seccomp 之前）。
+	if err := zygote.BringLoopbackUp(); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-init: 拉起 lo 失败: %v\n", err)
+		os.Exit(2)
+	}
+	// 这一行是 Z1 的可观测证据：worker netns 的 lo 从 down 变 up。
+	// 它出现在母体日志里（worker 的 stdout 接母体），可用 mother.sh log 查。
+	fmt.Println("worker-init: lo 已拉起（worker netns）")
+
+	// 3) 卸能力。mount / pivot_root 都要 CAP_SYS_ADMIN，这些活已在 setupRootfs 里
 	//    干完；payload 一个能力都不需要。必须同时拆 Bounding 天花板并清空五个集合——
 	//    否则 uid 0 的 payload 会在 execve 时被内核按 Bounding 重新补满（小知识点 49）。
 	if err := zygote.DropCapabilities(); err != nil {
@@ -73,7 +88,7 @@ func main() {
 	}
 	zygote.Mark("dropcaps")
 
-	// 3) 装 seccomp（此时 rootfs 已就绪、能力已卸、payload 尚未 execve）
+	// 4) 装 seccomp（此时 rootfs 已就绪、能力已卸、payload 尚未 execve）
 	n, unknown, err := zygote.InstallSeccomp(zygote.DefaultPayloadAllowlist(), uint32(config.DefaultErrnoRet))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "worker-init: 装 seccomp 失败: %v\n", err)
@@ -85,7 +100,7 @@ func main() {
 		fmt.Printf("worker-init: ⚠️ 名单里 %d 条没认出来（拼错=没写）: %v\n", len(unknown), unknown)
 	}
 
-	// 4) execve payload。带个 env 告诉 payload：seccomp 已由 init 装好（别再装一遍）。
+	// 5) execve payload。带个 env 告诉 payload：seccomp 已由 init 装好（别再装一遍）。
 	zygote.Mark("execve")
 	env := append(os.Environ(), "ANOLIX_INIT_SECCOMP=1")
 	if err := syscall.Exec(payload, append([]string{payload}, extra...), env); err != nil {
