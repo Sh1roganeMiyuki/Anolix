@@ -181,6 +181,10 @@ const (
 	// NetworkModeBridge 给容器接 veth + 宿主网桥 + NAT。
 	// 需要在宿主侧创建/配置网络设备，因此要求 root（rootless 不支持）。
 	NetworkModeBridge = "bridge"
+	// NetworkModeProxy 也是 veth + 网桥，但只放行到宿主代理端口的流量。
+	// 代理是七层的（HTTP CONNECT），所以它可以按**域名**而不是 IP 做白名单。
+	// 其余转发一律 drop——容器只能“通过代理”出去，不能直连任何地址。
+	NetworkModeProxy = "proxy"
 )
 
 // 网络参数的默认值。
@@ -214,6 +218,14 @@ type Network struct {
 	Publish []string `json:"publish"`
 	// MTU：网桥与 veth 的 MTU；0 = 1500。
 	MTU int `json:"mtu"`
+	// ProxyAllow：proxy 档的域名白名单，如 ["api.example.com", "*.openai.com"]。
+	// 支持两种写法：精确域名，或前缀 "*." 的子域通配。留空 = 拒绝一切（但 Validate 会报错，
+	// 因为一个不放行任何域名的代理没有意义，更像配置漏写）。
+	ProxyAllow []string `json:"proxyAllow"`
+	// ProxyPort：proxy 档下代理在网桥地址上的监听端口。
+	// **0 = 由内核分配**（推荐）：代理 port 不是给人看的，
+	// 固定端口会让“同一座网桥上只能跑一个 proxy 档容器”。
+	ProxyPort int `json:"proxyPort"`
 }
 
 // PublishSpec 是解析后的端口映射规则。
@@ -277,6 +289,14 @@ func (n Network) EffectiveMode() string {
 		return NetworkModeNone
 	}
 	return mode
+}
+
+// EffectiveProxyPort 返回配置里指定的代理端口；0 表示“交给内核分配”。
+//
+// 不提供默认固定值是有意的：代理端口只是一个内部握手地址，
+// 写死会让并行启动的第二个容器 bind 失败。
+func (n Network) EffectiveProxyPort() int {
+	return n.ProxyPort
 }
 
 // EffectiveBridge 返回生效的网桥名：留空 = anolix0。
@@ -431,9 +451,9 @@ func (p *Policy) Validate() error {
 func (n Network) Validate() error {
 	mode := n.EffectiveMode()
 	switch mode {
-	case NetworkModeNone, NetworkModeBridge:
+	case NetworkModeNone, NetworkModeBridge, NetworkModeProxy:
 	default:
-		return fmt.Errorf("不支持的 network.mode %q，可选: %s, %s", n.Mode, NetworkModeNone, NetworkModeBridge)
+		return fmt.Errorf("不支持的 network.mode %q，可选: %s, %s, %s", n.Mode, NetworkModeNone, NetworkModeBridge, NetworkModeProxy)
 	}
 
 	// 网桥名就是宿主上的接口名：内核限制 15 字符（IFNAMSIZ 16 含结尾 0），
@@ -494,7 +514,53 @@ func (n Network) Validate() error {
 	if n.MTU != 0 && (n.MTU < minMTU || n.MTU > maxMTU) {
 		return fmt.Errorf("network.mtu %d 超出合法范围 (%d-%d)", n.MTU, minMTU, maxMTU)
 	}
+
+	// proxy 档：白名单不能空（空 = 一个什么也不放行的代理，几乎一定是漏写）。
+	if mode == NetworkModeProxy {
+		if len(n.ProxyAllow) == 0 {
+			return fmt.Errorf("network.proxyAllow 不能为空（proxy 档必须至少放行一个域名）")
+		}
+		for _, raw := range n.ProxyAllow {
+			host := NormalizeAllowHost(raw)
+			if host == "" {
+				return fmt.Errorf("network.proxyAllow 条目 %q 为空", raw)
+			}
+			if !validHostPattern(host) {
+				return fmt.Errorf("network.proxyAllow 条目 %q 不是合法的域名", raw)
+			}
+		}
+	}
+	if n.ProxyPort != 0 && (n.ProxyPort < 1 || n.ProxyPort > 65535) {
+		return fmt.Errorf("network.proxyPort %d 超出范围 (1-65535)", n.ProxyPort)
+	}
 	return nil
+}
+
+// NormalizeAllowHost 把一条白名单条目规范成小写、无空白、无尾点的形式。
+//
+// 归一化只在这一处做，代理匹配和配置校验用的是同一套写法，
+// 避免“配置里写 `API.Example.com.`、实际请求是 `api.example.com`”这种形状差异。
+func NormalizeAllowHost(raw string) string {
+	host := strings.ToLower(strings.TrimSpace(raw))
+	host = strings.TrimSuffix(host, ".")
+	return host
+}
+
+// validHostPattern 判断一条白名单是不是“看着像域名”。
+//
+// 只挡最明显的错写（空白、斜杠、无点），不做完整 RFC 校验——
+// 这里的目标是「配置写错时启动就报错」，不是当 DNS 解析器。
+func validHostPattern(host string) bool {
+	if !strings.Contains(host, ".") {
+		return false
+	}
+	for _, r := range host {
+		// 0x5c 就是反斜杠的码位；写成数字是为了不用在源码里再转义一层。
+		if r <= ' ' || r == '/' || r == 0x5c {
+			return false
+		}
+	}
+	return true
 }
 
 // parseSubnet 解析 IPv4 CIDR，并拒绝 IPv6（容器内只配 IPv4 栈）。

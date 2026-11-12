@@ -225,7 +225,7 @@ func validateNetworkOptions(policy *config.Policy, cliPublish []string) error {
 // 顺序很重要：network.Setup 先创建 netns 与 veth，prepareBundle 才能把
 // netns 路径与 DNS 写进 config.json。失败时 Setup 内部已经回滚，不需要 teardown。
 func (l *Launcher) prepareNetwork(ctx context.Context) error {
-	if l.policy.Network.EffectiveMode() != config.NetworkModeBridge {
+	if m := l.policy.Network.EffectiveMode(); m != config.NetworkModeBridge && m != config.NetworkModeProxy {
 		return nil
 	}
 	cfg := l.policy.Network
@@ -465,12 +465,26 @@ func (l *Launcher) prepareBundle() error {
 	}
 	// 网络现场需要让容器内的探针知道“门是开着的”，并带上实际地址。
 	if l.net != nil {
-		env = append(env, "ANOLIX_NETWORK_MODE=bridge")
+		env = append(env, "ANOLIX_NETWORK_MODE="+l.policy.Network.EffectiveMode())
 		if l.net.ContainerIP != nil {
 			env = append(env, "ANOLIX_CONTAINER_IP="+l.net.ContainerIP.String())
 		}
 		if l.net.Gateway != nil {
 			env = append(env, "ANOLIX_GATEWAY="+l.net.Gateway.String())
+		}
+		// proxy 档：把代理地址写成环境变量。这是唯一的“告诉 payload 怎么出去”的渠道——
+		// 容器里没有默认路由能到外网，不认这个变量就真的出不去。
+		if l.net.ProxyAddr != "" {
+			proxyURL := "http://" + l.net.ProxyAddr
+			env = append(env,
+				"HTTP_PROXY="+proxyURL,
+				"HTTPS_PROXY="+proxyURL,
+				"http_proxy="+proxyURL,
+				"https_proxy="+proxyURL,
+				// NO_PROXY 只留回环：本机通信不该被绕到代理去。
+				"NO_PROXY=127.0.0.1,localhost",
+				"no_proxy=127.0.0.1,localhost",
+			)
 		}
 		// 只有“默认名单没放行 socket”时才要求探针断言 AF_UNIX 被拦，
 		// 避免把用户自定义的全放行名单误判成失败。

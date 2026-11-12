@@ -114,6 +114,12 @@ type Result struct {
 	DNS []string
 	// Publish 是解析后的端口映射。
 	Publish []config.PublishSpec
+	// ProxyAddr 是 proxy 档下容器要用的代理地址（形如 10.88.0.1:3128）。
+	// 其他档位为空——launcher 靠它决定要不要往容器里注入 HTTPS_PROXY。
+	ProxyAddr string
+	// ProxyPort 是代理实际监听的端口（ProxyPort 配置为 0 时由内核分配）。
+	// nft 的 forward 规则靠它放行，所以必须存下来。
+	ProxyPort int
 
 	containerID string
 	stateDir    string
@@ -131,6 +137,9 @@ type Result struct {
 	chainCreated       bool
 	outputChainCreated bool
 	ipam               *IPAM
+	// proxy 是 proxy 档起的出口代理；Teardown 时必须先于网络资源关掉，
+	// 否则在途隧道会抱着已删掉的 veth 不放。
+	proxy *Proxy
 }
 
 // Setup 创建容器网络：网桥 → NAT 基线 → 分配 IP → netns/veth → 端口映射。
@@ -146,9 +155,9 @@ func Setup(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("network: 容器 ID %q 含非法字符", opts.ContainerID)
 	}
 	cfg := opts.Config
-	if cfg.EffectiveMode() != config.NetworkModeBridge {
-		return nil, fmt.Errorf("network: Setup 只支持 %s 档位，实际 %q",
-			config.NetworkModeBridge, cfg.EffectiveMode())
+	if m := cfg.EffectiveMode(); m != config.NetworkModeBridge && m != config.NetworkModeProxy {
+		return nil, fmt.Errorf("network: Setup 只支持 %s / %s 档位，实际 %q",
+			config.NetworkModeBridge, config.NetworkModeProxy, m)
 	}
 	// 防御性再校验一次：launcher 已经验过 policy，但 Setup 也可以被直接调用。
 	if err := cfg.Validate(); err != nil {
@@ -216,14 +225,28 @@ func Setup(ctx context.Context, opts Options) (*Result, error) {
 	res.ipam = ipam
 	_ = ipam.GC()
 
-	// 第 1 步：共享基础设施（网桥、NAT 基线、转发开关）。
+	// 第 1 步：共享基础设施（网桥）。
 	if err := res.ensureBridge(ctx); err != nil {
 		return nil, err
 	}
+
+	// 第 1.5 步：proxy 档先起代理。必须排在 NAT 基线之前——
+	// forward 链要放行“到代理端口”的流量，而端口默认由内核分配，
+	// 只有代理真的 bind 上了才知道是几号。
+	if cfg.EffectiveMode() == config.NetworkModeProxy {
+		if err := res.startProxy(); err != nil {
+			_ = res.cleanupLocked(context.Background())
+			return nil, err
+		}
+	}
+
+	// 第 2 步：NAT 基线（forward 链会用到代理端口）+ 转发开关。
 	if err := res.ensureBaseNAT(ctx); err != nil {
+		_ = res.cleanupLocked(context.Background())
 		return nil, err
 	}
 	if err := ensureIPForward(); err != nil {
+		_ = res.cleanupLocked(context.Background())
 		return nil, err
 	}
 
@@ -275,6 +298,20 @@ func Teardown(ctx context.Context, res *Result) error {
 // cleanupLocked 执行真正的清理。调用方必须已经持有全局锁。
 func (r *Result) cleanupLocked(ctx context.Context) error {
 	var errs []error
+	// 最先关代理：它握着对外连接，不先断掉就会抱着即将被删掉的 veth 不放。
+	if r.proxy != nil {
+		if err := r.proxy.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("关闭代理: %w", err))
+		}
+		r.proxy = nil
+	}
+	// 代理关了，它在 forward 链里的那条放行规则也要一起走。
+	if r.ProxyPort != 0 {
+		if err := r.dropForwardRuleByPort(ctx); err != nil {
+			errs = append(errs, err)
+		}
+		r.ProxyPort = 0
+	}
 	if r.chainCreated {
 		if _, err := r.nft(ctx, "delete", "chain", "inet", nftTable, r.chain); err != nil && !isNotFound(err) {
 			errs = append(errs, fmt.Errorf("删除端口映射 chain %s: %w", r.chain, err))
@@ -312,6 +349,27 @@ func (r *Result) cleanupLocked(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// startProxy 在网桥地址上起代理（仅 proxy 档）。
+//
+// 绑在网桥地址而不是 0.0.0.0：宿主的其他网卡连不进来，
+// 只有能路由到这个网段的容器能连到代理。
+//
+// 端口取 cfg.EffectiveProxyPort()，0 表示交给内核分配——
+// 这是默认行为，否则同一座网桥上的第二个 proxy 容器会 bind 失败。
+func (r *Result) startProxy() error {
+	addr := net.JoinHostPort(r.Gateway.String(), strconv.Itoa(r.cfg.EffectiveProxyPort()))
+	p, err := StartProxy(addr, r.cfg.ProxyAllow)
+	if err != nil {
+		return err
+	}
+	r.proxy = p
+	r.ProxyAddr = p.Addr()
+	if _, portStr, err := net.SplitHostPort(r.ProxyAddr); err == nil {
+		r.ProxyPort, _ = strconv.Atoi(portStr)
+	}
+	return nil
 }
 
 // ensureBridge 幂等创建网桥、配置网关地址、设置 MTU 并拉起。

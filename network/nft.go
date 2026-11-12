@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"anolix/config"
 )
 
 // ensureBaseNAT 确保共享的 NAT 基线存在：
@@ -49,9 +51,24 @@ func (r *Result) ensureBaseNAT(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("查询 nft forward 规则失败: %w", err)
 	}
+	// forward 链的放行策略由档位决定，两者互排：
+	//   - bridge：从网桥进来的转发全部放行（由 masquerade 控制地址）；
+	//   - proxy ：只放行「到网关代理端口」，其余全部 drop（容器只能走代理）。
+	// 两种规则对同一张链的期望相反，所以 Setup 阶段会拒绝混用。
+	if r.cfg.EffectiveMode() == config.NetworkModeProxy {
+		return r.ensureProxyForward(ctx, out)
+	}
+	return r.ensureBridgeForward(ctx, out)
+}
+
+// ensureBridgeForward 是 bridge 档的 forward 策略：两个方向都放行。
+func (r *Result) ensureBridgeForward(ctx context.Context, listed string) error {
 	bridge := r.Bridge
+	if strings.Contains(listed, fmt.Sprintf("iifname %q drop", bridge)) {
+		return fmt.Errorf("网桥 %s 上已有 proxy 档的 forward 规则，与 bridge 档冲突；先清理再切换", bridge)
+	}
 	// nft list 输出里的接口名带引号，例如 iifname "anolix0"。
-	if !strings.Contains(out, fmt.Sprintf("iifname %q accept", bridge)) {
+	if !strings.Contains(listed, fmt.Sprintf("iifname %q accept", bridge)) {
 		if _, err := r.nft(ctx, "add", "rule", "inet", nftTable, "forward",
 			"iifname", bridge, "accept"); err != nil {
 			return fmt.Errorf("添加 forward 出站放行规则失败: %w", err)
@@ -60,10 +77,89 @@ func (r *Result) ensureBaseNAT(ctx context.Context) error {
 	// 进入容器的流量一律放行：容器网段是私有的，外部只能通过 DNAT 到达，
 	// 而未映射的端口根本没有 DNAT 规则（外部路由不到 10.88/16）。
 	// 这里不能只放行 established：DNAT 后的第一个包是 NEW。
-	if !strings.Contains(out, fmt.Sprintf("oifname %q accept", bridge)) {
+	if !strings.Contains(listed, fmt.Sprintf("oifname %q accept", bridge)) {
 		if _, err := r.nft(ctx, "add", "rule", "inet", nftTable, "forward",
 			"oifname", bridge, "accept"); err != nil {
 			return fmt.Errorf("添加 forward 入站放行规则失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureProxyForward 是 proxy 档的 forward 策略：只允许容器访问网关上的代理端口。
+//
+// 三条规则的意思：
+//
+//	① 从网桥进来、目标是网关代理端口 → 放行
+//	② 从网桥进来、其余一律丢（连容器互访也丢，这是刻意的）
+//	③ 回容器方向的包放行
+//
+// 注意 ① 的目标必须是“网关的 IP + 代理端口”：只写端口会把“访问别人家 3128”也放行。
+func (r *Result) ensureProxyForward(ctx context.Context, listed string) error {
+	bridge := r.Bridge
+	if strings.Contains(listed, fmt.Sprintf("iifname %q accept", bridge)) {
+		return fmt.Errorf("网桥 %s 上已有 bridge 档的 forward 规则，与 proxy 档冲突；先清理再切换", bridge)
+	}
+
+	gw := r.Gateway.String()
+	// 用【实际】监听的端口，不是配置里的值：配置默认 0 = 交给内核分配。
+	port := strconv.Itoa(r.ProxyPort)
+	if r.ProxyPort == 0 {
+		return fmt.Errorf("proxy 档的代理端口未就绪（应为 startProxy 之后的实际端口）")
+	}
+	towardProxy := fmt.Sprintf("ip daddr %s tcp dport %s accept", gw, port)
+	if !strings.Contains(listed, towardProxy) {
+		if _, err := r.nft(ctx, "add", "rule", "inet", nftTable, "forward",
+			"iifname", bridge, "ip", "daddr", gw, "tcp", "dport", port, "accept"); err != nil {
+			return fmt.Errorf("添加 forward →代理 放行规则失败: %w", err)
+		}
+	}
+
+	if !strings.Contains(listed, fmt.Sprintf("iifname %q drop", bridge)) {
+		if _, err := r.nft(ctx, "add", "rule", "inet", nftTable, "forward",
+			"iifname", bridge, "drop"); err != nil {
+			return fmt.Errorf("添加 forward 默认丢包规则失败: %w", err)
+		}
+	}
+
+	if !strings.Contains(listed, fmt.Sprintf("oifname %q accept", bridge)) {
+		if _, err := r.nft(ctx, "add", "rule", "inet", nftTable, "forward",
+			"oifname", bridge, "accept"); err != nil {
+			return fmt.Errorf("添加 forward 回容器放行规则失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// dropForwardRuleByPort 删掉 forward 链里“到本容器代理端口”的那条放行规则。
+//
+// nft 没有“按内容删规则”的命令，只能 -a list 拿到 handle 再按 handle 删。
+// 不清理也不会立刻报错，但规则会随容器数量线性增长，最终变成排查噪声——
+// 而且旧端口的放行规则会默默地为后来的容器开口子。
+func (r *Result) dropForwardRuleByPort(ctx context.Context) error {
+	if r.Gateway == nil || r.ProxyPort == 0 {
+		return nil
+	}
+	out, err := r.nft(ctx, "-a", "list", "chain", "inet", nftTable, "forward")
+	if err != nil {
+		return nil // 表/链不在了 = 已经清干净
+	}
+	needle := fmt.Sprintf("ip daddr %s tcp dport %d accept", r.Gateway.String(), r.ProxyPort)
+	const handleMark = "# handle "
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		i := strings.LastIndex(line, handleMark)
+		if i < 0 {
+			continue
+		}
+		handle := strings.TrimSpace(line[i+len(handleMark):])
+		if handle == "" {
+			continue
+		}
+		if _, err := r.nft(ctx, "delete", "rule", "inet", nftTable, "forward", "handle", handle); err != nil {
+			return fmt.Errorf("删除代理放行规则 handle=%s 失败: %w", handle, err)
 		}
 	}
 	return nil

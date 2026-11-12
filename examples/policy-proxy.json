@@ -1,0 +1,23 @@
+{
+  "seccomp": {
+    "enabled": true,
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "errnoRet": 38
+  },
+  "resources": {
+    "memoryLimitBytes": 134217728,
+    "pidsLimit": 128,
+    "cpuQuotaMicros": 50000,
+    "cpuPeriodMicros": 100000
+  },
+  "network": {
+    "mode": "proxy",
+    "subnet": "10.88.0.0/16",
+    "gateway": "10.88.0.1",
+    "proxyAllow": [
+      "example.com",
+      "*.openai.com",
+      "*.anthropic.com"
+    ]
+  }
+}

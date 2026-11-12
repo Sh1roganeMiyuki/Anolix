@@ -308,11 +308,11 @@ func applyNetwork(spec *specs.Spec, policy *config.Policy, netnsPath, resolvConf
 	if spec == nil || spec.Linux == nil {
 		return errors.New("spec 缺少 linux 段")
 	}
-	if policy.Network.EffectiveMode() != config.NetworkModeBridge {
+	if m := policy.Network.EffectiveMode(); m != config.NetworkModeBridge && m != config.NetworkModeProxy {
 		return nil
 	}
 	if netnsPath == "" {
-		return errors.New("network.mode=bridge 但 netns 路径为空")
+		return errors.New("network.mode 需要网卡但 netns 路径为空")
 	}
 	if !filepath.IsAbs(netnsPath) {
 		return fmt.Errorf("netns 路径必须是绝对路径: %q", netnsPath)
