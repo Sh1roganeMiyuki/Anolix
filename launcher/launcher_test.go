@@ -710,3 +710,77 @@ func TestApplyNetworkUserSocketBypassesFilter(t *testing.T) {
 		t.Errorf("用户规则不应被改写: %+v", socketRules[0])
 	}
 }
+
+// TestOverlayRequiresRootfs 盯住参数自洽：overlay 的 lower 层就是 --rootfs，
+// 没给它就无从挂载，必须在启动前报错，而不是等到 mount 失败。
+func TestOverlayRequiresRootfs(t *testing.T) {
+	_, err := New(Options{
+		Command: []string{"/probe"},
+		Overlay: true,
+	})
+	if err == nil {
+		t.Fatal("开了 overlay 却没给 --rootfs，应当报错")
+	}
+	if !strings.Contains(err.Error(), "rootfs") {
+		t.Errorf("错误信息应提到 rootfs, 实际: %v", err)
+	}
+}
+
+// TestOverlayRequiresRoot 盯住环境前提：overlayfs 挂载需要 CAP_SYS_ADMIN。
+// 测试通常以普通用户跑，正好覆盖这条；root 下跳过（root 能过这一关）。
+func TestOverlayRequiresRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 下这条检查不会触发")
+	}
+	_, err := New(Options{
+		Command: []string{"/probe"},
+		Rootfs:  "..",
+		Overlay: true,
+	})
+	if err == nil {
+		t.Fatal("非 root 开 overlay 应当报错")
+	}
+	if !strings.Contains(err.Error(), "root") {
+		t.Errorf("错误信息应提到 root, 实际: %v", err)
+	}
+}
+
+// TestSetupOverlay 真实挂一次 overlay（需要 root，其余环境跳过）。
+//
+// 它验三件事：lower 的文件在 merged 里可见、往 merged 写文件不污染 lower、
+// Close 之后挂载点被卸载干净。这就是“容器 A 写文件不会污染容器 B”的最小证据。
+func TestSetupOverlay(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("需要 root（CAP_SYS_ADMIN）才能挂 overlay")
+	}
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "base.txt"), []byte("base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	m, err := setupOverlay(base, parent)
+	if err != nil {
+		t.Fatalf("setupOverlay() 出错: %v", err)
+	}
+
+	// 1. lower 的文件在 merged 里可见（说明是“叠起来”而不是“空目录”）。
+	if _, err := os.Stat(filepath.Join(m.merged, "base.txt")); err != nil {
+		t.Errorf("merged 里应能看到 lower 的文件: %v", err)
+	}
+
+	// 2. 往 merged 写文件：copy-up 到 upper，不能落到 base。
+	if err := os.WriteFile(filepath.Join(m.merged, "new.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("往 merged 写文件失败: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "new.txt")); err == nil {
+		t.Error("写 merged 不应污染 lower 层（这说明写入隔离失效）")
+	}
+
+	// 3. Close 之后挂载点要干净：merged 目录应该已经被删掉。
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() 出错: %v", err)
+	}
+	if _, err := os.Stat(m.merged); err == nil {
+		t.Error("Close() 后 merged 目录应被删除")
+	}
+}

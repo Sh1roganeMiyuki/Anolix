@@ -63,6 +63,7 @@ func run() int {
 	keepBundle := fs.Bool("keep-bundle", false, "退出后保留 bundle 目录（调试用）")
 	timing := fs.Bool("timing", false, "打印各阶段耗时（测启动开销用）")
 	minimalRootfs := fs.Bool("minimal-rootfs", false, "只挂 /proc 与 /dev，不掩蔽/不重挂（A/B 对比用）")
+	overlayFS := fs.Bool("overlay", false, "用 overlayfs 给容器挂独立可写层（容器间写入隔离，需要 root）")
 	networkMode := fs.String("network", "", "网络档位：none（缺省）/ bridge；覆盖 policy.network.mode")
 	var publish stringList
 	fs.Var(&publish, "publish", "端口映射（可重复）：8080:80 或 8080:80/udp；需要 network.mode=bridge")
@@ -124,6 +125,7 @@ func run() int {
 		Timing:        *timing,
 		T0NS:          t0ns,
 		MinimalRootfs: *minimalRootfs,
+		Overlay:       *overlayFS,
 		Publish:       publish,
 	})
 	if err != nil {

@@ -89,6 +89,11 @@ type Options struct {
 	// NetworkStateDir 是网络资源状态目录（IPAM 记录与全局锁）；空 = /run/anolix。
 	// 主要给测试/多实例使用，正常部署不需要改。
 	NetworkStateDir string
+	// Overlay 为 true 时，用 overlayfs 给每个容器挂一个独立可写层：
+	// lower = --rootfs 指定的只读基础层，upper/work = 每次运行新建的临时目录。
+	// 这样容器之间写文件不会互相污染，退出时卸载并清理。
+	// 需要 root（挂载需要 CAP_SYS_ADMIN）；未指定 --rootfs 时无 lower，不生效。
+	Overlay bool
 }
 
 // MonotonicNS 返回 CLOCK_MONOTONIC 纳秒。
@@ -116,6 +121,10 @@ type Launcher struct {
 	bundleTmp bool     // bundle 是不是"我们自动建的临时目录"（决定退出时删不删它）
 	rootfs    string   // 写进说明书的 root 路径（Run 时才确定）
 	rootless  bool     // 是否非 root 运行（是的话要开 user namespace）
+
+	// overlay 现场（只在 Overlay 且给了 --rootfs 时有值）：
+	overlay    *overlayMount // 挂载点与清理需要的目录
+	overlayDur time.Duration // 挂载耗时（--timing 时单独打一行）
 
 	// 网络现场（只在 network.mode=bridge 时有值）：
 	net        *network.Result // 成功 Setup 后的网络账号（Teardown 靠它）
@@ -145,6 +154,14 @@ func New(opts Options) (*Launcher, error) {
 	// 并把 CLI 映射与 policy 映射合并后再查一次端口冲突。
 	if err := validateNetworkOptions(policy, opts.Publish); err != nil {
 		return nil, err
+	}
+	// overlay 需要 lower 层（就是 --rootfs），没给它就无从挂载。
+	if opts.Overlay && opts.Rootfs == "" {
+		return nil, errors.New("--overlay 需要 --rootfs（overlay 的 lower 层就是它）")
+	}
+	// overlay 挂载需要 CAP_SYS_ADMIN；非 root 直接拒绝，比等到 mount 报 EPERM 清楚。
+	if opts.Overlay && os.Geteuid() != 0 {
+		return nil, errors.New("--overlay 需要 root（overlayfs 挂载需要 CAP_SYS_ADMIN）")
 	}
 
 	// ③ 选启动层：Runtime 优先，RuncPath 作为兼容旧字段。
@@ -349,12 +366,22 @@ func (l *Launcher) Run(ctx context.Context) (int, error) {
 	// 第 2 步：准备 bundle（建目录 + 写说明书），失败就直接返回。
 	// 第 3 步：登记"退出时删临时 bundle"——不管后面成功失败都会执行。
 	if err := l.prepareBundle(); err != nil {
+		// prepareBundle 可能已经挂好了 overlay 才失败（比如写 config.json 出错），
+		// 这里补一刀清理，避免挂载点泄漏。
+		l.cleanupOverlay()
 		return -1, err
 	}
 	defer l.cleanupBundle()
+	// defer 是后进先出：cleanupOverlay 注册在 cleanupBundle 之后，所以它先执行——
+	// 必须“先卸载 overlay，再删 bundle 目录”。
+	defer l.cleanupOverlay()
 	if l.opts.Timing {
 		fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ① 准备 bundle（含写 config.json）: %v\n",
 			time.Since(t0).Round(100*time.Microsecond))
+		if l.overlay != nil {
+			fmt.Fprintf(l.opts.Stderr, "anolix: [timing] ①.5 overlay 挂载（lower+upper+work）: %v\n",
+				l.overlayDur.Round(10*time.Microsecond))
+		}
 	}
 
 	// 第 4 步：确定 runc 的"记账本"目录；rootless 时保证它存在且只有自己能读。
@@ -557,6 +584,19 @@ func (l *Launcher) prepareRootfs() error {
 		return fmt.Errorf("解析 rootfs 真实路径失败: %w", err)
 	}
 	l.rootfs = canonical
+
+	// 开了 overlay 就把 rootfs 换成 merged 视图：lower 是上面这个只读基础层。
+	// 写进说明书的是 merged，所以容器看到的 / 是“基础层 + 自己的 upper”。
+	if l.opts.Overlay {
+		start := time.Now()
+		m, err := setupOverlay(canonical, l.bundle)
+		if err != nil {
+			return err
+		}
+		l.overlay = m
+		l.overlayDur = time.Since(start)
+		l.rootfs = m.merged
+	}
 	return nil
 }
 
@@ -566,6 +606,17 @@ func (l *Launcher) cleanupBundle() {
 	if l.bundleTmp && !l.opts.KeepBundle {
 		_ = os.RemoveAll(l.bundle)
 	}
+}
+
+// cleanupOverlay 卸载并清理 overlay 挂载（没有挂载时什么也不做）。
+func (l *Launcher) cleanupOverlay() {
+	if l.overlay == nil {
+		return
+	}
+	if err := l.overlay.Close(); err != nil {
+		fmt.Fprintf(l.opts.Stderr, "anolix: 清理 overlay 失败: %v\n", err)
+	}
+	l.overlay = nil
 }
 
 // forceDeleteContainer 尽力强制删除可能仍存活的容器（忽略错误）。

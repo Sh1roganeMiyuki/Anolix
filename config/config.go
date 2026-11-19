@@ -69,6 +69,9 @@ const (
 // 后者是 musl/busybox 等用户态实际使用的路径——漏掉不会报错，只会静默失败
 // （实测：名单只有 clone 时，busybox 的 fork 被 defaultAction 盖章）。
 // 网络、ptrace、mount、bpf、keyctl 等高风险调用不在其中。
+// 补充两条实测缺口（strace 抓 busybox 得出，见 docs 的白名单缺口一节）：
+//   - stat：busybox 的 PATH 搜索与启动配置检查都用它，缺了 sh 起子进程直接 ENOSYS；
+//   - setitimer：wget/nc 的超时靠它，缺了 -w/-T 失效。
 var DefaultAllowedSyscalls = []string{
 	"access", "arch_prctl", "brk", "chdir", "chmod", "clock_getres",
 	"clock_gettime", "clock_nanosleep", "clone", "clone3", "close",
@@ -85,8 +88,8 @@ var DefaultAllowedSyscalls = []string{
 	"pwrite64", "read", "readlink", "readlinkat", "readv", "rename",
 	"renameat", "renameat2", "restart_syscall", "rmdir", "rseq",
 	"rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sched_getaffinity",
-	"sched_yield", "set_robust_list", "set_tid_address", "sigaltstack",
-	"statfs", "statx", "symlink", "symlinkat", "tgkill", "time", "truncate",
+	"sched_yield", "setitimer", "set_robust_list", "set_tid_address", "sigaltstack",
+	"stat", "statfs", "statx", "symlink", "symlinkat", "tgkill", "time", "truncate",
 	"umask", "uname", "unlink", "unlinkat", "utimensat", "vfork", "wait4", "waitid",
 	"write", "writev",
 }
