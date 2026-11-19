@@ -29,6 +29,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -66,10 +67,18 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 		return 0, fmt.Errorf("请求缺少 binary")
 	}
 
+	// rootless：母体以普通用户跑时，初始 user ns 里没有 CAP_SYS_ADMIN，
+	// clone 6 ns 会 EPERM。加 CLONE_NEWUSER 当钥匙：内核先建 user ns（创建者在里面
+	// 自动拿全套 ns 内 caps），再建其余 ns；uid/gid map 由母体在 clone 后写。
+	rootless := os.Geteuid() != 0
+	flags := uintptr(NamespaceFlags)
+	if rootless {
+		flags |= syscall.CLONE_NEWUSER
+	}
 	cmd := exec.Command(req.Binary, req.Args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// 核心：一步 clone 出带 6 间房的 worker，不需要中间进程。
-		Cloneflags: NamespaceFlags,
+		Cloneflags: flags,
 		// 让 worker 成为新 session leader，脱离母体的终端/会话
 		//（避免后台作业读终端被 SIGTTIN 停住——交接文档里踩过的坑）。
 		Setsid: true,
@@ -105,6 +114,10 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 		t0 = MonotonicNS()
 	}
 	cmd.Env = append(append([]string{}, baseEnv...), TimingEnvs(t0, req.WorkerID)...)
+	if rootless {
+		// worker 在 user ns 内 Geteuid()==0，靠 euid 判断不了 rootless；用 env 传标记。
+		cmd.Env = append(cmd.Env, RootlessEnv+"=1")
+	}
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
@@ -122,6 +135,15 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 
 	// 关键：母体不在 PID namespace 中 → cmd.Process.Pid 就是宿主 PID。
 	hostPID := cmd.Process.Pid
+
+	// rootless 握手：clone 返回时 worker 的 uid_map 还是空的（overflow uid、无 caps），
+	// 必须母体立刻写 map；worker-init 开头会等 map 非空再继续。
+	if rootless {
+		if err := writeIDMaps(hostPID); err != nil {
+			_ = cmd.Process.Kill() // map 写失败 worker 会永远卡在等 map，必须杀
+			return 0, fmt.Errorf("rootless: 写 uid/gid map 失败: %w", err)
+		}
+	}
 
 	// 收尸 + 清理：worker 是母体的直接子进程（没有 intermediate 退出触发 reparent）。
 	// 母体常驻，必须自己 Wait，否则 worker 退出后留僵尸；
@@ -143,7 +165,43 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 			log.Printf("worker %d 退出异常: %v", hostPID, werr)
 		}
 		cg.Destroy()
+		// overlay 目录清理：worker 是 PID ns 的 1 号，它死了整个 ns 的后代都被带走，
+		// overlay 引用归零，此时删才安全。空/非法 id 不删，避免误删 base 之外。
+		// 没用 --overlay 的 worker 这里 RemoveAll 是 no-op；同 id 的崩溃残留顺带被 GC。
+		if dir, ok := OverlayDir(req.WorkerID); ok {
+			if err := os.RemoveAll(dir); err != nil {
+				log.Printf("清理 overlay 目录 %s 失败: %v", dir, err)
+			}
+		}
 	}()
 
 	return hostPID, nil
+}
+
+// writeIDMaps 给 rootless worker 写单映射：ns 内 0 → 母体 euid/egid。
+//
+// 母体是 user ns 的创建者，unprivileged 下只允许映射自己的 uid/gid（单行）。
+// setgroups 必须先 deny，否则写 gid_map 被内核拒绝（ supplementary groups 会漏）。
+// 用 O_WRONLY 不带 O_TRUNC：procfs 的 map 文件只接受一次写入。
+func writeIDMaps(pid int) error {
+	base := fmt.Sprintf("/proc/%d", pid)
+	write := func(name, content string) error {
+		f, err := os.OpenFile(filepath.Join(base, name), os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.WriteString(content)
+		return err
+	}
+	if err := write("setgroups", "deny"); err != nil {
+		return fmt.Errorf("setgroups: %w", err)
+	}
+	if err := write("uid_map", fmt.Sprintf("0 %d 1\n", os.Geteuid())); err != nil {
+		return fmt.Errorf("uid_map: %w", err)
+	}
+	if err := write("gid_map", fmt.Sprintf("0 %d 1\n", os.Getegid())); err != nil {
+		return fmt.Errorf("gid_map: %w", err)
+	}
+	return nil
 }

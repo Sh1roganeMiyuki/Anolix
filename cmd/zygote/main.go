@@ -45,6 +45,13 @@ func main() {
 	cgMinimal := flag.Bool("cg-minimal", false, "实验用：cgroup 只写 memory.max，跳过 swap/pids/cpu")
 	flag.Parse()
 
+	// rootless（普通用户起母体）无 cgroup 写权限，CLONE_INTO_CGROUP 会失败；
+	// 显式关掉围栏并提示，而不是等到建叶子时才报错。
+	if *cgEnable && os.Geteuid() != 0 {
+		log.Printf("rootless: 无 cgroup 写权限，--cgroup 已忽略（资源围栏不可用）")
+		*cgEnable = false
+	}
+
 	// 母体默认的 worker 资源围栏（每个 worker 一份；请求里可覆盖）。
 	defLim := zygote.CgroupLimits{}
 	if *cgMemMB > 0 {

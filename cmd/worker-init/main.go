@@ -31,7 +31,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"anolix/config"
 	"anolix/zygote"
@@ -49,9 +51,39 @@ func main() {
 	// 后续每站的 ns 值都是相对母体 clone 前那一刻的 CLOCK_MONOTONIC。
 	zygote.Mark("init_start")
 
-	rootfs, payload, extra, harden := parseArgs(os.Args[1:])
+	// rootless 握手：等母体把 uid_map 写好再动 rootfs。
+	if err := waitUIDMap(); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-init: %v\n", err)
+		os.Exit(2)
+	}
+	// rootless 的 caps 陷阱：母体 clone 后孩子立即 execve，那一刻 map 还空（uid=overflow），
+	// 内核按“非 root exec”清空 effective caps；map 后写只改 uid、**不重算 caps**。
+	// 所以等 map 好后 re-exec 自己一次，让 execve 在 uid=0 下重算出全满 caps。
+	// REEXECED 标记防无限循环；rootful 不走这条（map 天生非空、exec 时 uid 已 0）。
+	if os.Getenv(zygote.RootlessEnv) == "1" && os.Getenv("ANOLIX_REEXECED") != "1" {
+		env := append(os.Environ(), "ANOLIX_REEXECED=1")
+		if err := syscall.Exec("/proc/self/exe", os.Args, env); err != nil {
+			fmt.Fprintf(os.Stderr, "worker-init: rootless re-exec 失败: %v\n", err)
+			os.Exit(2)
+		}
+	}
+	// 临时调试（ANOLIX_DEBUG=1）：看 rootless 下 map 与 CapEff 真实值。
+	if os.Getenv("ANOLIX_DEBUG") == "1" {
+		if b, e := os.ReadFile("/proc/self/uid_map"); e == nil {
+			fmt.Fprintf(os.Stderr, "DEBUG uid_map=%q\n", string(b))
+		}
+		if b, e := os.ReadFile("/proc/self/status"); e == nil {
+			for _, l := range strings.Split(string(b), "\n") {
+				if strings.HasPrefix(l, "CapEff") || strings.HasPrefix(l, "Uid:") {
+					fmt.Fprintln(os.Stderr, "DEBUG", l)
+				}
+			}
+		}
+	}
+
+	rootfs, payload, extra, harden, overlay := parseArgs(os.Args[1:])
 	if rootfs == "" || payload == "" {
-		fmt.Fprintln(os.Stderr, "用法: worker-init [--harden] --rootfs <dir> -- <payload> [args...]")
+		fmt.Fprintln(os.Stderr, "用法: worker-init [--harden] [--overlay] --rootfs <dir> -- <payload> [args...]")
 		os.Exit(2)
 	}
 
@@ -63,7 +95,7 @@ func main() {
 	}
 
 	// 1) 装 rootfs（换根 + 挂基础设施）
-	if err := setupRootfs(rootfs, harden); err != nil {
+	if err := setupRootfs(rootfs, harden, overlay); err != nil {
 		fmt.Fprintf(os.Stderr, "worker-init: rootfs 设置失败: %v\n", err)
 		os.Exit(2)
 	}
@@ -109,8 +141,26 @@ func main() {
 	}
 }
 
+// waitUIDMap 等母体把 uid_map 写好（rootless 握手）。
+//
+// clone 返回时 map 还是空的：本进程是 overflow uid、无 caps，mount/pivot 都会 EPERM。
+// rootful 时初始 ns 的 map 天生非空（0 0 4294967295），立即返回，不影响原路径。
+func waitUIDMap() error {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := os.ReadFile("/proc/self/uid_map")
+		if err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等 uid_map 超时（母体没写 map？）")
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
 // parseArgs 解析 "[--harden] --rootfs <dir> -- <payload> [args...]"。
-func parseArgs(a []string) (rootfs, payload string, args []string, harden bool) {
+func parseArgs(a []string) (rootfs, payload string, args []string, harden, overlay bool) {
 	i := 0
 	for i < len(a) {
 		switch {
@@ -120,6 +170,11 @@ func parseArgs(a []string) (rootfs, payload string, args []string, harden bool) 
 		case a[i] == "--harden":
 			// 补上与 runc 同构的掩蔽/只读清单（A/B 对比用，默认关闭）。
 			harden = true
+			i++
+		case a[i] == "--overlay":
+			// 每个 worker 一个独立可写层：lower=共享 rootfs，upper=自己的改动集。
+			// 不开时所有 worker 共享同一份 rootfs（A 写 B 可见）。
+			overlay = true
 			i++
 		case a[i] == "--":
 			if i+1 < len(a) {
@@ -144,41 +199,23 @@ func parseArgs(a []string) (rootfs, payload string, args []string, harden bool) 
 //   - bind rootfs→自身：pivot_root 要求 new_root 是个**挂载点**；
 //   - put_old：必须在新根之下；换完后 detach 拆旧根、删目录；
 //   - 挂 /proc：payload 常用（`ps`/读 /proc 等）。
-func setupRootfs(rootfs string, harden bool) error {
+func setupRootfs(rootfs string, harden, overlay bool) error {
 	// ① 整个 mount ns 私有化（递归），否则改动会漏到宿主。
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("MS_PRIVATE(/) 失败: %w", err)
 	}
 	zygote.Mark("ms_private")
 
-	// ② rootfs bind 到自身 → 变成挂载点（pivot_root 前提）。
-	if err := syscall.Mount(rootfs, rootfs, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("bind %s 失败: %w", rootfs, err)
+	// ②~⑥ 换根：两条实现，时机相同——都必须在“还看得见宿主路径”的窗口内做完。
+	if overlay {
+		if err := pivotOverlay(rootfs); err != nil {
+			return err
+		}
+	} else {
+		if err := pivotBind(rootfs); err != nil {
+			return err
+		}
 	}
-	zygote.Mark("bind_rootfs")
-
-	// ③ 准备 put_old（旧根的落脚处，必须在新根下面）。
-	oldRoot := filepath.Join(rootfs, ".oldroot")
-	if err := os.MkdirAll(oldRoot, 0700); err != nil {
-		return fmt.Errorf("建 put_old 失败: %w", err)
-	}
-
-	// ④ 换根。
-	if err := syscall.PivotRoot(rootfs, oldRoot); err != nil {
-		return fmt.Errorf("pivot_root 失败: %w", err)
-	}
-	zygote.Mark("pivot_root")
-	// ⑤ 切到新根（pivot_root 后 cwd 还在旧根，必须先切）。
-	if err := os.Chdir("/"); err != nil {
-		return fmt.Errorf("chdir(/) 失败: %w", err)
-	}
-
-	// ⑥ 摘掉旧根（detach 立即生效，旧根就彻底从视野消失）。
-	_ = syscall.Unmount("/.oldroot", syscall.MNT_DETACH)
-	// ⚠️ 不删 /.oldroot：rootfs 是所有 worker 共享的同一份目录，删掉它会和
-	// 别的 worker 的 mkdir+pivot_root 竞态（并发实测 6/64 报 pivot_root ENOENT）。
-	// 留一个空目录，代价为零。
-	zygote.Mark("detach_oldroot")
 
 	// ⑦ 挂基础设施：/proc（必需）、/dev（tmpfs，best-effort）。
 	_ = os.MkdirAll("/proc", 0555)
@@ -198,6 +235,87 @@ func setupRootfs(rootfs string, harden bool) error {
 		zygote.Mark("harden")
 	}
 
+	return nil
+}
+
+// pivotBind 是默认换根：把共享 rootfs bind 到自身再 pivot_root。
+// 所有 worker 换到同一份目录 → 同一批 inode → A 写 B 可见（无写入隔离）。
+func pivotBind(rootfs string) error {
+	// rootfs bind 到自身 → 变成挂载点（pivot_root 前提）。
+	if err := syscall.Mount(rootfs, rootfs, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind %s 失败: %w", rootfs, err)
+	}
+	zygote.Mark("bind_rootfs")
+
+	// put_old：旧根的落脚处，必须在新根下面。
+	oldRoot := filepath.Join(rootfs, ".oldroot")
+	if err := os.MkdirAll(oldRoot, 0700); err != nil {
+		return fmt.Errorf("建 put_old 失败: %w", err)
+	}
+	if err := syscall.PivotRoot(rootfs, oldRoot); err != nil {
+		return fmt.Errorf("pivot_root 失败: %w", err)
+	}
+	zygote.Mark("pivot_root")
+	if err := os.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir(/) 失败: %w", err)
+	}
+	_ = syscall.Unmount("/.oldroot", syscall.MNT_DETACH)
+	// ⚠️ 不删 /.oldroot：rootfs 是所有 worker 共享的同一份目录，删掉它会和
+	// 别的 worker 的 mkdir+pivot_root 竞态（并发实测 6/64 报 pivot_root ENOENT）。
+	zygote.Mark("detach_oldroot")
+	return nil
+}
+
+// pivotOverlay 用 overlayfs 换根：lower=共享 rootfs，upper=本 worker 的改动集。
+//
+// 为什么能在这里用宿主路径：此刻还没 pivot_root，worker 的挂载表是从母体
+// （宿主裸进程）复制的，/tmp 和 rootfs 都还看得见。过了这一步就再也够不到。
+//
+// 目录约定 /tmp/anolix-overlay/<RUN_ID>：母体 reap 时按同一规则删（见 spawn.go）。
+func pivotOverlay(rootfs string) error {
+	id := os.Getenv(zygote.RunIDEnv)
+	if id == "" {
+		// 不经母体直接跑 worker-init 时没有 RUN_ID，用时间戳兜底；
+		// 这种目录母体不认识，由调用方自己清理。
+		id = fmt.Sprintf("anon-%d", time.Now().UnixNano())
+	}
+	base, ok := zygote.OverlayDir(id)
+	if !ok {
+		return fmt.Errorf("RUN_ID %q 含非法字符，不能用作目录名", id)
+	}
+	upper := filepath.Join(base, "upper")
+	work := filepath.Join(base, "work")
+	merged := filepath.Join(base, "merged")
+	// 三条硬约束：upper/work 同一文件系统（否则 EXDEV）；
+	// upper/work/merged 都不能落在 lower 里面（否则内核拒绝，会递归）。
+	// 三个都建在 /tmp 下、lower 是 rootfs，天然满足。
+	for _, d := range []string{upper, work, merged} {
+		if err := os.MkdirAll(d, 0700); err != nil {
+			return fmt.Errorf("建 %s 失败: %w", d, err)
+		}
+	}
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", rootfs, upper, work)
+	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		return fmt.Errorf("mount overlay 失败: %w", err)
+	}
+	zygote.Mark("overlay_mount")
+
+	// 换根用 runc 的 "." 技巧，而不是在 merged 里建 .oldroot：
+	// merged 是 overlay 视图，在里面 mkdir 会 copy-up 进 upper，留下垃圾目录。
+	if err := os.Chdir(merged); err != nil {
+		return fmt.Errorf("chdir(merged) 失败: %w", err)
+	}
+	if err := syscall.PivotRoot(".", "."); err != nil {
+		return fmt.Errorf("pivot_root 失败: %w", err)
+	}
+	zygote.Mark("pivot_root")
+	if err := syscall.Unmount(".", syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("摘旧根失败: %w", err)
+	}
+	if err := os.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir(/) 失败: %w", err)
+	}
+	zygote.Mark("detach_oldroot")
 	return nil
 }
 
