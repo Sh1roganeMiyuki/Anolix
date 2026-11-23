@@ -94,8 +94,15 @@ func SpawnWorker(req *SpawnRequest, warmFile *os.File, cg *WorkerCgroup) (int, e
 
 	// 把预热 memfd 传给 worker：ExtraFiles[0] → worker 侧的 fd 3（见 warm.go 约定）。
 	// fd 会跨 clone+exec 继承，memfd 不依赖挂载 ns，新 mount ns 里照样能 mmap。
+	// 传只读 fd：母体保留 rdwr，worker 拿 O_RDONLY 重开的描述符，
+	// 既不能 write 也不能 mmap 可写（与 F_SEAL_WRITE 双保险）。
 	if warmFile != nil {
-		cmd.ExtraFiles = []*os.File{warmFile}
+		ro, err := os.OpenFile(fmt.Sprintf("/proc/self/fd/%d", warmFile.Fd()), os.O_RDONLY, 0)
+		if err != nil {
+			return 0, fmt.Errorf("重开只读 warm fd 失败: %w", err)
+		}
+		defer ro.Close() // Start 已 dup 进孩子，母体这份用完即关
+		cmd.ExtraFiles = []*os.File{ro}
 	}
 
 	if len(req.Env) > 0 {

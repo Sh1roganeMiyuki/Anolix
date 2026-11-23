@@ -78,6 +78,14 @@ func CreateWarmMemfd(size int) (*os.File, error) {
 		}
 		written += n
 	}
+	// 填完后加封条：F_SEAL_WRITE 让 write 与可写共享 mmap 都 EPERM，
+	// 即使 fd 是 rdwr 也改不了共享页；SHRINK/GROW 防改大小；SEAL 防再改封条。
+	// 这是“只读热状态”从约定变强制的关键（worker 是不可信 payload）。
+	seals := uintptr(fSealWrite | fSealShrink | fSealGrow | fSealSeal)
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), fAddSeals, seals); errno != 0 {
+		f.Close()
+		return nil, fmt.Errorf("加 memfd 封条失败: %w", error(errno))
+	}
 	return f, nil
 }
 
@@ -255,11 +263,24 @@ const sysMemfdCreate = 319 // x86-64
 // 不影响传给 worker 的那份：os/exec 是用 dup2 把它挪到 fd 3 的，dup2 会清掉该标志。
 const mfdCloexec = 0x0001
 
+// mfdAllowSealing = MFD_ALLOW_SEALING：允许后续 fcntl(F_ADD_SEALS) 加封条。
+// 不开这个位，F_ADD_SEALS 会 EPERM。
+const mfdAllowSealing = 0x0002
+
+// fcntl F_ADD_SEALS 与封条位（x86-64 Linux）。
+const (
+	fAddSeals   = 1033
+	fSealSeal   = 0x0001 // 禁止再改封条
+	fSealShrink = 0x0002 // 禁止缩小
+	fSealGrow   = 0x0004 // 禁止扩大
+	fSealWrite  = 0x0008 // 禁止 write + 可写共享 mmap
+)
+
 // memfdCreate 用裸 syscall 创建 memfd（不引入 x/sys/unix 依赖）。
 func memfdCreate(name string) (*os.File, error) {
 	nb := append([]byte(name), 0) // C 字符串需 null 结尾
 	fd, _, errno := syscall.RawSyscall(sysMemfdCreate,
-		uintptr(unsafe.Pointer(&nb[0])), mfdCloexec, 0)
+		uintptr(unsafe.Pointer(&nb[0])), mfdCloexec|mfdAllowSealing, 0)
 	if errno != 0 {
 		return nil, fmt.Errorf("memfd_create 失败: %w", error(errno))
 	}
